@@ -355,6 +355,15 @@ public class PackCheck { public static void main(String[] a) throws Exception {
         for want in ('70,010 files', 'code 70,000', 'shaders 1', '65,535 entries', 'without --game-apk'): self.assertIn(want, str(e.exception))
         self.assertEqual(ba.game_app_plan(parts, MB, 1 << 30, False, files={'code': 100}, dlc_files=ba.GAME_APP_ENTRIES), (False, False))   # DLC whose files don't fit goes beside
 
+    def test_a_windows_build_stages_the_same_files_without_a_link(self):   # Windows' stage clones what a Mac's links: the same files.txt, and nothing in the stage is a link
+        with mock.patch.object(ba, 'STAGE_LINKS', False):
+            made, inside, info, stage, game, aoc = self.make(False, 512 << 20)
+        self.assertTrue(made[0].is_file())
+        listed = (stage / 'files.txt').read_text().split()
+        for want in ('code/main.fixups.tsv', 'font/standard.ttf', 'spv.zip', 'icon.jpg', 'control.nacp', 'game.json'): self.assertIn(want, listed)
+        self.assertFalse(any(p.is_symlink() for p in stage.rglob('*')))   # every folder and file the stage holds is real
+        self.assertEqual((stage / 'code/main.fixups.tsv').read_bytes(), b'x' * 100)
+
     def test_build_apk_names_the_limit_it_hit(self):   # zipfile raises one LargeZipFile for every limit; the message says which
         import zipfile
         spec = importlib.util.spec_from_file_location('build_apk', REPO / 'dm/android/tools/build_apk.py'); assert spec and spec.loader
