@@ -154,11 +154,18 @@ done:
 }
 // The variant is an lmod made at once (its module, no identifier): its code goes through the rewrites lm_code gives the file's (the pool set, the subgroup
 // rewrites, the set's binding numbers made dense), which the pipeline's other modules and the layout have
-static lmod *ps_variant_prim(vshader *s, uint32_t miss, uint32_t prim) {
-    for (int i = 0; i < s->npvar; i++) if (s->pvar[i].miss == miss && s->pvar[i].prim == prim) return s->pvar[i].m;
+static lmod *ps_variant_prim(vshader *s, uint32_t miss, uint32_t prim, uint32_t rne) {
+    if (!prim) return ps_variant(s, miss, rne);   // nothing per-primitive: the inputs variant, and spv_rne where it applies
+    for (int i = 0; i < s->npvar; i++) if (s->pvar[i].miss == miss && s->pvar[i].prim == prim && s->pvar[i].rne == rne) return s->pvar[i].m;
     char p[700]; snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key);
     size_t n = 0, nd = 0, on = 0; uint32_t *w = spv_read(p, &n), *d = w && miss ? spv_drop_inputs(w, n, miss, &nd) : NULL;
     uint32_t *v = w ? spv_perprim(d ? d : w, d ? nd : n, prim, &on) : NULL;
+    if (v && rne) {   // the outputs spv_rne rounds, as lm_code gives the file's module (a store's value, so the rewrites below are of no matter)
+        size_t need = 0; int why = 0; uint32_t *sc = malloc(3 * (size_t)v[3] * 4), *rv = NULL;
+        if (sc) { spv_rne(v, on, rne, sc, NULL, 0, &need, &why); if (need && (rv = malloc(need * 4))) need = spv_rne(v, on, rne, sc, rv, need, &need, &why); }
+        free(sc);
+        if (need) { free(v); v = rv; on = need; } else free(rv);
+    }
     lmod *m = NULL;
     if (v) {
         uint32_t *code = v, *np = NULL, *pf = NULL, *fit = NULL; size_t cn = on, nn, pn, fn;
@@ -174,7 +181,7 @@ static lmod *ps_variant_prim(vshader *s, uint32_t miss, uint32_t prim) {
     LOG("[vk] fragment shader %s: inputs at locations %#x are per-primitive outputs of a mesh shader%s: a SPIR-V 1.4 variant reads them PerPrimitiveEXT%s", s->key, prim,
         miss ? ", and some no stage writes (zero)" : "", m ? "" : " [RED] (variant failed: the pipeline keeps the shader as it is)");
     free(w); free(d); free(v);
-    if (!m) m = miss ? ps_variant(s, miss) : s->mod;
-    if (s->npvar < 2) { s->pvar[s->npvar].miss = miss; s->pvar[s->npvar].prim = prim; s->pvar[s->npvar++].m = m; }
+    if (!m) m = miss || rne ? ps_variant(s, miss, rne) : s->mod;
+    if (s->npvar < (int)(sizeof s->pvar / sizeof *s->pvar)) { s->pvar[s->npvar].miss = miss; s->pvar[s->npvar].prim = prim; s->pvar[s->npvar].rne = rne; s->pvar[s->npvar++].m = m; }
     return m;
 }

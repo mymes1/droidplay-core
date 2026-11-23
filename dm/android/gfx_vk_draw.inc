@@ -140,14 +140,14 @@ typedef struct {
     int vid;   // a vertex shader reading gl_VertexIndex: its draws keep their vertex numbers (bind_vbufs lo 0)
     uint32_t io_in, io_out;   // the locations of its user-defined inputs and outputs (bit n: location n)
     uint32_t io_prim;   // a mesh shader's per-primitive outputs (res.json prim_locs, spv_mesh.py): its fragment shaders read them PerPrimitiveEXT
-    struct { uint32_t miss; struct lmod *m; } var[4]; int nvar;   // fragment shaders: variants with unwritten inputs made constants (ps_variant)
+    struct { uint32_t miss, rne; struct lmod *m; } var[8]; int nvar;   // fragment shaders: variants with unwritten inputs made constants (ps_variant), and the outputs spv_rne.h rounds (rne)
     uint32_t tgs;   // bytes of shared memory a workgroup takes from the spill buffer at SPV_TGS_BINDING (its module declares more than the GPU takes: spv_fit_tgs); 0: none
-    struct { uint32_t miss, prim; struct lmod *m; } pvar[2]; int npvar;   // fragment shaders: variants reading a mesh shader's per-primitive outputs (gfx_vk_mesh.inc ps_variant_prim)
+    struct { uint32_t miss, prim, rne; struct lmod *m; } pvar[4]; int npvar;   // fragment shaders: variants reading a mesh shader's per-primitive outputs (gfx_vk_mesh.inc ps_variant_prim), and the outputs spv_rne.h rounds
     int b0;   // a module of its set (.spv, .z.spv, .tf.spv; ps_variant only makes inputs private) reads binding 0, the support buffer (spv_b0_used): stage_set writes it only then
     int wlayer;   // a vertex, tessellation or geometry shader that writes the layer (spv_layer_out): its draws get every layer of their targets (rp_prepare)
     int lbpc, lbase;   // the layer less the push constant base in a vertex shader, plus it in a fragment shader (spv_fit_lbase): lbpc, a module of it reads the base (its
                        // pipelines' layouts take it, and their draws set it); lbase, a vertex shader's every module does, so its draws may be made once per g_vs_layers layers (vs_layer_groups)
-    struct { uint32_t miss; struct lmod *m; } avar[4]; int navar;   // alpha-test variants (ps_alpha_mod, spv_alpha.h) by the inputs variant; a NULL module: the transform does not apply
+    struct { uint32_t miss, rne; struct lmod *m; } avar[8]; int navar;   // alpha-test variants (ps_alpha_mod, spv_alpha.h) by the inputs variant and the outputs spv_rne.h rounds; a NULL module: the transform does not apply
     ds_list *dsf;   // its descriptor sets kept by each chunk, [2 chunk + tf] (dsl, dsl_tf): made at its first set (ds_get), never freed (as the shader)
     uint32_t ndesc;   // descriptors in dsl, an array's counted up to TEX_ARR_MAX (what stage_set writes of it): DM_VK_SET_STATS=1 checks each stage_set writes them all
     uint8_t dsbig;   // bit tf: one set of its layout (dsl, dsl_tf) does not fit an empty pool (sh_get ds_fits, else ds_alloc_n, RED 93): ds_get gives none for it, without making another pool
@@ -160,7 +160,7 @@ typedef struct {
     const spv_bmap *bmap;   // its set's binding numbers compacted (spv_bind.h): NULL when none is at SPV_BIND_FROM or past it; its modules and its layout take it
     struct memu_t *memu;   // a task or mesh shader's compute form, on a GPU without VK_EXT_mesh_shader (gfx_vk_meshemu.inc: its facts, pipeline and pass-through vertex shader)
     uint8_t tbrows;   // a texture slot of it read a buffer texture as rows (tex_rows_slot, stage_textures): draw_view lands pending writes to those first
-    struct { uint32_t miss; int alpha; uint64_t bl; struct lmod *m; } blv[4]; int nblv;   // fragment shaders: variants filtering textures the GPU can't (ps_bl_mod, gfx_vk_bilin.inc); a NULL module: not made
+    struct { uint32_t miss, rne; int alpha; uint64_t bl; struct lmod *m; } blv[8]; int nblv;   // fragment shaders: variants filtering textures the GPU can't (ps_bl_mod, gfx_vk_bilin.inc), and the outputs spv_rne.h rounds; a NULL module: not made
     uint16_t blno;   // texture slots of the first 16 it never samples (only fetches or queries): bl_entry leaves them out (ps_bl_mod)
 } vshader;
 static int memu_on(void); static int memu_facts(vshader *s, const jv *e); static int memu_ready(vshader *s); static vshader *memu_pvs_get(const char *key);   // gfx_vk_meshemu.inc
@@ -765,13 +765,13 @@ static size_t spv_pool_fit(const uint32_t *code, size_t nw, const char *what, ui
 static size_t spv_fit_harr(const uint32_t *code, size_t nw, const char *what, uint32_t **out);   // after gfx_vk_pool.inc (POOL_SET)
 static int pool_on(void); static void pool_note_shader(vshader *s, int info); static void pool_drop_view(VkImageView iv);
 #include "gfx_vk_lmod.inc"   // shader modules made when a pipeline needs them: lmod, lm_new, lm_pipeline
-static lmod *ps_variant(vshader *s, uint32_t miss) {
-    for (int i = 0; i < s->nvar; i++) if (s->var[i].miss == miss) return s->var[i].m;
+static lmod *ps_variant(vshader *s, uint32_t miss, uint32_t rne) {
+    for (int i = 0; i < s->nvar; i++) if (s->var[i].miss == miss && s->var[i].rne == rne) return s->var[i].m;
     char p[700]; snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key);
-    lmod *m = lm_new(p, miss, s->bmap, NULL);
-    LOG("[vk] fragment shader %s: inputs at locations %#x are written by no earlier stage of a pipeline: a variant reads them as zero%s", s->key, miss, m ? "" : " [RED] (variant failed: the pipeline keeps the shader as it is)");
-    if (!m) m = s->mod;
-    if (s->nvar < 4) { s->var[s->nvar].miss = miss; s->var[s->nvar++].m = m; }
+    lmod *m = rne ? lm_new_r(p, miss, rne, s->bmap, NULL) : lm_new(p, miss, s->bmap, NULL);
+    if (miss) LOG("[vk] fragment shader %s: inputs at locations %#x are written by no earlier stage of a pipeline: a variant reads them as zero%s", s->key, miss, m ? "" : " [RED] (variant failed: the pipeline keeps the shader as it is)");
+    if (!m) m = s->mod;   // a variant that cannot be made: the file's module, as it is
+    if (s->nvar < (int)(sizeof s->var / sizeof *s->var)) { s->var[s->nvar].miss = miss; s->var[s->nvar].rne = rne; s->var[s->nvar++].m = m; }
     return m;
 }
 // Where transform feedback is captured. The vertex stage's capture (.tf.spv) needs vertexPipelineStoresAndAtomics, which Arm's Mali drivers lack, so there the
@@ -2040,36 +2040,58 @@ static int alpha_test_on(const pipe_key *k) {
 // leaves inputs unwritten is transformed first (spv_drop_inputs), then the alpha test (lm_code). NULL: the transform does not apply (colour 0 is no vec4 of
 // float), the draw keeps the shader as it is, and that is remembered so no pipeline retries it
 static pthread_mutex_t g_alpha_mu = PTHREAD_MUTEX_INITIALIZER;   // one variant per shader and inputs variant, made here and in the prewarm thread (pipe_prep) outside the replay's lock
-static lmod *ps_alpha_mod_locked(vshader *s, uint32_t miss) {
-    for (int i = 0; i < s->navar; i++) if (s->avar[i].miss == miss) return s->avar[i].m;
+static lmod *ps_alpha_mod_locked(vshader *s, uint32_t miss, uint32_t rne) {
+    for (int i = 0; i < s->navar; i++) if (s->avar[i].miss == miss && s->avar[i].rne == rne) return s->avar[i].m;
     char p[700]; snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key);
-    lmod *m = lm_new_a(p, miss, 1, s->bmap, NULL);   // the code goes through spv_alpha.h (lm_code), and its identifier is of the test in it
-    if (s->navar < 4) { s->avar[s->navar].miss = miss; s->avar[s->navar++].m = m; }
+    lmod *m = lm_new_a(p, miss, 1, rne, s->bmap, NULL);   // the code goes through spv_alpha.h (lm_code), and its identifier is of the test in it
+    if (s->navar < (int)(sizeof s->avar / sizeof *s->avar)) { s->avar[s->navar].miss = miss; s->avar[s->navar].rne = rne; s->avar[s->navar++].m = m; }
     if (m) { static int nl; if (nl++ < 8) LOG("[vk] fragment shader %s: alpha-test variant (its function a specialization constant, the reference a push constant)", s->key); }
     return m;
 }
-static lmod *ps_alpha_mod(vshader *s, uint32_t miss) {   // the cache and the module are one thread's at a time (pipeline creation, the prewarm thread)
+static lmod *ps_alpha_mod(vshader *s, uint32_t miss, uint32_t rne) {   // the cache and the module are one thread's at a time (pipeline creation, the prewarm thread)
     pthread_mutex_lock(&g_alpha_mu);
-    lmod *m = ps_alpha_mod_locked(s, miss);
+    lmod *m = ps_alpha_mod_locked(s, miss, rne);
     pthread_mutex_unlock(&g_alpha_mu);
     return m;
 }
 // The fragment shader's module: the alpha-test variant (spv_alpha.h), and a variant when the earlier stage leaves inputs unwritten (spv_drop_inputs). *alpha is 1
 // when the alpha variant is the one returned; the caller sets the function's specialization then
-static lmod *ps_variant_prim(vshader *s, uint32_t miss, uint32_t prim);   // gfx_vk_mesh.inc
-static lmod *ps_bl_mod(vshader *s, uint32_t miss, int alpha, uint64_t bl);   // gfx_vk_bilin.inc
+static lmod *ps_variant_prim(vshader *s, uint32_t miss, uint32_t prim, uint32_t rne);   // gfx_vk_mesh.inc
+static lmod *ps_bl_mod(vshader *s, uint32_t miss, int alpha, uint64_t bl, uint32_t rne);   // gfx_vk_bilin.inc
+// The outputs a pass's 8-bit UNORM targets tie on. Maxwell rounds a value exactly halfway between two codes to the even code, the Adreno away from zero
+// (Vulkan leaves it to the GPU), and Hedgehog Engine 2's G-buffer writes material flags as (flags + 0.5) / 255 into an R8G8B8A8_UNORM target: stored rounded
+// up, every flag byte's low bit is set, the deferred lighting skips its light-probe ambient and the world draws black (Sonic Frontiers). The fragment shader
+// of such a pass gets the variant whose stores spv_rne.h rounds, so the shader decides the tie as the Switch does (gfx_vk_lmod.inc lm_code)
+// DM_VK_UNORM8_RNE=1 (env.txt): on a GPU it does not name; 0: off, the GPU's conversion
+static int rne_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_VK_UNORM8_RNE");
+        v = e && *e ? *e != '0' : g_vk.props.vendorID == 0x5143;   // Qualcomm's GPU (Adreno; the conversion, Qualcomm's driver's and Turnip's alike, rounds a tie up)
+        if (v) LOG("[vk] %s: a fragment output to an 8-bit UNORM target is rounded to the even code as Maxwell rounds it (spv_rne.h%s)", g_vk.props.deviceName, e && *e ? ", DM_VK_UNORM8_RNE" : "");
+        else if (e && *e) LOG("[vk] DM_VK_UNORM8_RNE=0: an 8-bit UNORM target keeps this GPU's conversion of a tie"); }
+    return v;
+}
+static uint32_t rne_locs(const pipe_key *k) {   // the locations whose target is an 8-bit UNORM image
+    if (k->tf || !rne_on()) return 0;
+    uint32_t m = 0;
+    for (uint32_t i = 0; i < k->ncolor && i < 8; i++) {
+        VkFormat f = k->rk.color[i];
+        if (f == VK_FORMAT_R8_UNORM || f == VK_FORMAT_R8G8_UNORM || f == VK_FORMAT_R8G8B8A8_UNORM || f == VK_FORMAT_B8G8R8A8_UNORM) m |= 1u << i;
+    }
+    return m;
+}
 // the stage before the fragment shader: the geometry shader (a task shader in slot 2 comes before the mesh shader), else the vertex or mesh shader
 static const vshader *pipe_ps_prev(const pipe_key *k) { return k->sh[2] && k->sh[2]->stage == SH_GS ? k->sh[2] : k->sh[0]; }
 static lmod *pipe_ps_mod(const pipe_key *k, vshader *s, int *alpha) {
-    const vshader *pv = pipe_ps_prev(k); uint32_t miss = pv ? s->io_in & ~pv->io_out : 0;
+    const vshader *pv = pipe_ps_prev(k); uint32_t miss = pv ? s->io_in & ~pv->io_out : 0, rne = rne_locs(k);
     *alpha = 0;
     if (pv && pv->stage == SH_MS) {   // after a mesh shader: the inputs it writes per primitive (ps_variant_prim), and no alpha test: a mesh pipeline's push constant holds the draw's first workgroup (pipe_make)
         if (alpha_test_on(k)) RED_ONCE(165, "fragment shader %s after mesh shader %s: the game's alpha test (function %u) is not run in a task / mesh pipeline", s->key, pv->key, (unsigned)k->color.alpha_func);
-        uint32_t prim = s->io_in & pv->io_prim & ~miss; return prim ? ps_variant_prim(s, miss, prim) : miss ? ps_variant(s, miss) : s->mod; }
+        uint32_t prim = s->io_in & pv->io_prim & ~miss; return prim || rne ? ps_variant_prim(s, miss, prim, rne) : miss ? ps_variant(s, miss, rne) : s->mod; }
     if (k->bl) {   // textures it filters itself (gfx_vk_bilin.inc), with the alpha test where it applies; NULL: as below, read nearest
-        int a = alpha_test_on(k) && ps_alpha_mod(s, miss) != NULL; lmod *m = ps_bl_mod(s, miss, a, k->bl); if (m) { *alpha = a; return m; } }
-    if (alpha_test_on(k)) { lmod *m = ps_alpha_mod(s, miss); if (m) { *alpha = 1; return m; } }
-    return miss ? ps_variant(s, miss) : s->mod;
+        int a = alpha_test_on(k) && ps_alpha_mod(s, miss, rne) != NULL; lmod *m = ps_bl_mod(s, miss, a, k->bl, rne); if (m) { *alpha = a; return m; } }
+    if (alpha_test_on(k)) { lmod *m = ps_alpha_mod(s, miss, rne); if (m) { *alpha = 1; return m; } }
+    return miss || rne ? ps_variant(s, miss, rne) : s->mod;
 }
 // ---- Pipelines made again at start ----
 // Creating a pipeline costs the Adreno driver about 2 ms (a shader compile; less when its pipeline cache has the binary): Super Mario Bros. Wonder made 122 in one

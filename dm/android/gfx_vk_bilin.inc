@@ -54,13 +54,13 @@ static uint64_t bl_entry(const vshader *s, const tc_ent *e) {
     if (nl != 1) { RED_ONCE(199, "%s shader %s samples a texture of format %d, which this GPU doesn't filter linearly, through a linear sampler, its view %u levels: read nearest (said once)", sh_stage_name(s->stage), s->key, f, nl); return 0; }
     return 1ull << e->slot | (uint64_t)(bl_fmt_ch(f) - 1) << (16 + 2 * e->slot);
 }
-// The fragment shader's variant whose samples of the marked slots are gathers (spv_bilin.h): one per inputs variant, alpha test and mask, made here and in the
-// prewarm thread outside the replay's lock (as ps_alpha_mod). NULL: spv_bilin left the module as it was, and the draw reads nearest
+// The fragment shader's variant whose samples of the marked slots are gathers (spv_bilin.h): one per inputs variant, alpha test, mask and spv_rne locations, made
+// here and in the prewarm thread outside the replay's lock (as ps_alpha_mod). NULL: spv_bilin left the module as it was, and the draw reads nearest
 static pthread_mutex_t g_bl_mu = PTHREAD_MUTEX_INITIALIZER;
-static lmod *ps_bl_mod(vshader *s, uint32_t miss, int alpha, uint64_t bl) {
+static lmod *ps_bl_mod(vshader *s, uint32_t miss, int alpha, uint64_t bl, uint32_t rne) {
     pthread_mutex_lock(&g_bl_mu);
     lmod *m = NULL; int i = 0;
-    for (; i < s->nblv; i++) if (s->blv[i].miss == miss && s->blv[i].alpha == alpha && s->blv[i].bl == bl) { m = s->blv[i].m; break; }
+    for (; i < s->nblv; i++) if (s->blv[i].miss == miss && s->blv[i].alpha == alpha && s->blv[i].bl == bl && s->blv[i].rne == rne) { m = s->blv[i].m; break; }
     if (i == s->nblv) {
         char p[700]; snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key);
         // a slot the shader never samples (it only fetches or queries the texture) needs nothing: dropped here, and from later masks (blno), so their draws take the
@@ -72,8 +72,8 @@ static lmod *ps_bl_mod(vshader *s, uint32_t miss, int alpha, uint64_t bl) {
             if (code) spv_bilin(code, fn, (uint32_t)(s->set & 3), &bq, 1, NULL, 0, &need, &left);
             if (code && !need && !left) s->blno |= (uint16_t)(1u << q); else b[nb++] = bq; }
         free(code);
-        m = nb ? lm_new_b(p, miss, alpha, (uint32_t)(s->set & 3), b, nb, s->bmap) : NULL;
-        if (s->nblv < (int)(sizeof s->blv / sizeof *s->blv)) { s->blv[s->nblv].miss = miss; s->blv[s->nblv].alpha = alpha; s->blv[s->nblv].bl = bl; s->blv[s->nblv++].m = m; }
+        m = nb ? lm_new_b(p, miss, alpha, rne, (uint32_t)(s->set & 3), b, nb, s->bmap) : NULL;
+        if (s->nblv < (int)(sizeof s->blv / sizeof *s->blv)) { s->blv[s->nblv].miss = miss; s->blv[s->nblv].alpha = alpha; s->blv[s->nblv].bl = bl; s->blv[s->nblv].rne = rne; s->blv[s->nblv++].m = m; }
         static int nl;
         if (!m && nb) RED_ONCE(200, "fragment shader %s samples textures this GPU doesn't filter linearly (slots %#llx), and spv_bilin can't filter them in the shader: read nearest (said once)", s->key, (unsigned long long)(bl & 0xffff));
         else if (m && nl++ < 8) { char d[120] = ""; for (int q = 0; q < nb; q++) { size_t l = strlen(d); snprintf(d + l, sizeof d - l, "%s%d", q ? ", " : "", b[q] & 0xfff); }

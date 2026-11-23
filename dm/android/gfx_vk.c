@@ -27,6 +27,7 @@
 #include "gfx_vk.h"
 #include "spv_readonly.h"
 #include "spv_alpha.h"
+#include "spv_rne.h"   // fragment outputs to an 8-bit UNORM target rounded as Maxwell's conversion rounds them, where the GPU's differs (gfx_vk_draw.inc rne_locs)
 #include "spv_limits.h"
 #include "spv_layer.h"   // layer and viewport output made ordinary outputs on a GPU that has none (gfx_vk_draw.inc spv_fit_layer)
 #include "spv_bilin.h"   // bilinear filtering made by a fragment shader, for formats the GPU can't filter linearly (gfx_vk_bilin.inc)
