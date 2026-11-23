@@ -86,6 +86,7 @@ static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, int tff, ui
         free(sc);
         if (need) {
             free(code); code = o; n = need; o = NULL;
+            if (first) { static int nl; if (nl++ < 8) LOG("[vk] %s: the output(s) at location(s) %#x rounded to the even code, as Maxwell's conversion rounds a tie (spv_rne.h)", path, rne); }
             const char *d = getenv("DM_DUMP_DIR");   // for spirv-val
             if (first && d) { char q[700]; mkdir(d, 0777); const char *b = strrchr(path, '/'); snprintf(q, sizeof q, "%s/rne_%.16s_%x.spv", d, b ? b + 1 : path, rne); FILE *f = fopen(q, "wb"); if (f) { fwrite(code, 4, n, f); fclose(f); } }
         } else {
