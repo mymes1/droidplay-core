@@ -332,15 +332,22 @@ open-source Turnip driver, such as [Mr. Purple's](https://github.com/MrPurple666
 a build of Mesa's RADV for Xclipse, such as [radv-xclipse](https://github.com/JimVulkan/radv-xclipse/releases) (its Android package, `vulkan.radeon.so`). The app
 carries what loads it ([libadrenotools](../dm/third_party/libadrenotools/README.md)), so trying one needs no new build:
 
-1. Unzip the driver package (`turnip_mrpurple_T30-toasted.adpkg.zip`, say). It holds a `.so` (`vulkan.purple.so`) and a `meta.json` that names it.
-2. Copy the `.so` into `Android/data/org.nxnative.android/files/`, beside `env.txt`: `adb push vulkan.purple.so /sdcard/Android/data/org.nxnative.android/files/`.
-   A game app reads its own folder, `Android/data/org.nxnative.game.t<title ID>/files/`.
-3. Add `DM_VK_DRIVER=vulkan.purple.so` to `env.txt` there (a path relative to that folder, or an absolute one), then start the game.
+1. In a game's settings screen, under Graphics, tap **Add a driver package (.zip)…** and pick the driver's zip (`turnip_mrpurple_T30-toasted.adpkg.zip`, say): the app
+   unpacks its `.so` (`vulkan.purple.so`) and the `meta.json` that names it into `Android/data/org.nxnative.android/files/drivers/<name>/`, and the game's **Graphics
+   driver** row then lists it by the name and version the `meta.json` gives (`Turnip 24.3.0 24.3.0-devel`). Pick it, and the game starts on it; Phone's own puts the
+   system's driver back, Remove takes a package off the phone. The choice is the game's own, kept like its other settings.
+2. By hand, for `env.txt` or the command-line host: unzip the package, copy its `.so` into `Android/data/org.nxnative.android/files/`, beside `env.txt` (`adb push
+   vulkan.purple.so /sdcard/Android/data/org.nxnative.android/files/`; a game app reads its own folder, `Android/data/org.nxnative.game.t<title ID>/files/`), and add
+   `DM_VK_DRIVER=vulkan.purple.so` to `env.txt` there, or `DM_VK_DRIVER=drivers/<name>/vulkan.purple.so` for the folder the screen unpacks. `env.txt` wins over the
+   screen.
 
 The app copies the driver into its internal storage at start, since Android loads no code from shared storage, and copies it again when the file changes. The log
 names the driver that runs: `[vk] driver: … (DM_VK_DRIVER, through libadrenotools), not the system's: PurpleVK-public Adreno (TM) 740 …`. A driver that can't run
 (a wrong path, a build for another GPU, one that loads but can't make the Vulkan device or the window's swapchain) gets one `[RED] [vk] DM_VK_DRIVER …` line saying why, and the game runs on
-the system's driver. On a phone with neither an Adreno nor an Xclipse GPU (a Mali) the line is ignored, and the log says so. When a start with the driver crashes in the driver's
+the system's driver. On a phone with neither an Adreno nor an Xclipse GPU (a Mali, a PowerVR) the line is ignored, and the log says so: no driver package can take the place of Arm's Mali
+driver (the open-source PanVK needs the kernel interface Samsung's Mali driver does not offer), so nothing that can be unpacked there will run a game. A package a game
+chose in the settings screen is tried there anyway (`DM_VK_DRIVER_ANY=1`, written with it), since a wrapper or a driver for that GPU may turn up; it makes no device and
+the game runs on the phone's own driver, with the start screen saying which ran and why. When a start with the driver crashes in the driver's
 code, loses the GPU, or ends in its first 30 seconds (a hang you closed, say), the next start runs on the system's driver once, and the start screen and the log say why;
 the start after that tries your driver again. A crash outside the driver's code is noted but doesn't count against it, and a hang after the first 30 seconds isn't
 caught. The app keeps each driver's last start in `files/vk_driver_state/<driver file>.json` and each game's in
@@ -348,7 +355,9 @@ caught. The app keeps each driver's last start in `files/vk_driver_state/<driver
 `files/games/<title ID>/vk_start.txt`: the driver and GPU it ran on, how many pipelines the driver refused (their draws are missing from the picture) with the first
 shaders' keys, and a lost GPU. Remove the line from `env.txt`
 (or start it with `#`) to go back. Each driver keeps its own pipeline cache, so the first start on a new driver compiles the game's pipelines again (it can take a
-minute to the first frame, and it stutters until they are built), and the system driver's cache is still there afterwards.
+minute to the first frame, and it stutters until they are built), and the system driver's cache is still there afterwards. On a phone whose GPU is slow, or whose driver
+misbehaves, the settings screen's **Compatibility mode** helps: the game's pipelines are built when a draw first needs them, so a scene's new models are never missing
+while they compile, at the cost of a longer start and longer pauses at a scene's first frames.
 
 Whether a driver helps depends on the game and the device. With Mr. Purple's T30, Super Mario Odyssey's opening runs at 60 fps on an Odin 2 (as on its own driver)
 and at 40 fps on a Retroid Pocket 5 (38 on its own); Pokémon Brilliant Diamond's Eterna City runs at 58 fps on a Retroid Pocket 5 with

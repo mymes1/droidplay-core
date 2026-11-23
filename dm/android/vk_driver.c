@@ -1,13 +1,17 @@
 // The Vulkan driver behind gfx_vk.h's vk* pointers.
 //   By default the system's: libvulkan.so, opened when the replay makes its device (vkb), as linking it did before.
-//   DM_VK_DRIVER=<file> (env.txt) runs another driver, such as a build of Mesa's Turnip for Adreno GPUs, as players of Switch emulators use: a .so the player puts on the
-//   device, named relative to the folder env.txt is in (or by an absolute path). Android loads no library from shared storage, so it is copied into the app's internal files
-//   (vk_driver/<name>), and opened through libadrenotools (dm/third_party/libadrenotools): a second copy of the system's libvulkan.so in a linker namespace of its own, where
-//   a hook loads the player's driver in place of the vendor's. The loader in that copy still makes the window surface and the swapchain, which Turnip on Android lacks.
+//   DM_VK_DRIVER=<file or package> (env.txt, or a game's launcher.txt, where the launcher's Graphics driver row writes it) runs another driver, such as a build of Mesa's
+//   Turnip for Adreno GPUs, as players of Switch emulators use: the .so the player puts on the device, or the driver package folder it comes in (a zip the launcher unpacks
+//   into files/drivers/<name>/ with its meta.json, driver_pkg.h), named relative to the folder env.txt is in (or by an absolute path). Android loads no library from shared
+//   storage, so it is copied into the app's internal files (vk_driver/<name>), and opened through libadrenotools (dm/third_party/libadrenotools): a second copy of the
+//   system's libvulkan.so in a linker namespace of its own, where a hook loads the player's driver in place of the vendor's. The loader in that copy still makes the window
+//   surface and the swapchain, which Turnip on Android lacks.
 //   A driver that cannot be copied or opened, or that offers no GPU, logs one [RED] line, and the system's driver runs. So does one that opens and then fails to make the
 //   instance, find the GPU's graphics queue or the window extensions, or make the device (gfx_vk.c vk_create, through vk_driver_fallback), or the first window's surface
 //   or swapchain (front_android.c vk_window_first): a player's choice of driver must never leave a game without a picture. On a phone whose GPU is neither an Adreno nor a
-//   Samsung Xclipse, DM_VK_DRIVER is not opened at all.
+//   Samsung Xclipse, DM_VK_DRIVER is not opened at all unless DM_VK_DRIVER_ANY=1 (env.txt): a driver for a Mali, PowerVR or Xclipse GPU, or a wrapper, which the launcher
+//   sets when a player picks a package, so the choice is tried on the phone it was made on, whatever its GPU (the crash guard below and the fallbacks above keep a driver
+//   that cannot run from leaving a game without a picture).
 #include <dirent.h>
 #include <dlfcn.h>
 #include <signal.h>
@@ -21,6 +25,7 @@
 #include "dm.h"
 #include "gfx_vk.h"
 #include "../third_party/libadrenotools/include/adrenotools/driver.h"   // the type of adrenotools_open_libvulkan, opened with dlsym: the host does not link it
+#include "driver_pkg.h"   // a driver package: its .so, and what its meta.json calls it
 
 #define VKB_DEF(f) PFN_##f f;
 VKB_FNS_GLOBAL(VKB_DEF) VKB_FNS(VKB_DEF)
@@ -94,15 +99,43 @@ static int first_gpu(PFN_vkGetInstanceProcAddr g, VkPhysicalDeviceProperties *pr
     return ok;
 }
 
-// DM_VK_DRIVER's driver → its vkGetInstanceProcAddr, NULL (and one [RED] line) when it cannot run
+// The .so a package folder holds, and what its meta.json calls it (name, version): 0 and one [RED] line when the folder has no .so to load
+static int pkg_so(const char *drv, const char *root, char *src, size_t sn, char *label, size_t ln, char *meta, size_t mn) {
+    char so[200]; int r = dpk_scan(root, so, sizeof so);
+    if (r) {
+        DRV_RED(drv, "the driver package %s: %s; the system's driver instead", root,
+                r == DPK_NO_SO ? "it holds no .so" : r == DPK_MANY_SO ? "it holds several .so files and its meta.json names none (\"library\")" : "the folder cannot be read");
+        return 0;
+    }
+    snprintf(src, sn, "%s/%s", root, so);
+    dpk_label(root, label, ln);
+    char p[1200], js[8192] = "", nm[96] = "", ver[64] = "";
+    snprintf(p, sizeof p, "%s/meta.json", root);
+    FILE *f = fopen(p, "rb"); size_t k = 0;
+    if (f) { k = fread(js, 1, sizeof js - 1, f); fclose(f); js[k] = 0; }
+    if (k) {
+        dpk_field(js, k, "name", nm, sizeof nm);
+        if (!dpk_field(js, k, "driverVersion", ver, sizeof ver)) dpk_field(js, k, "packageVersion", ver, sizeof ver);
+    }
+    if (nm[0] && ver[0]) snprintf(meta, mn, "%s, version %s", nm, ver);
+    else if (nm[0]) snprintf(meta, mn, "%s", nm);
+    else if (ver[0]) snprintf(meta, mn, "version %s", ver);
+    else meta[0] = 0;
+    return 1;
+}
+// DM_VK_DRIVER's driver → its vkGetInstanceProcAddr, NULL (and one [RED] line) when it cannot run. drv: a .so, or a driver package folder (its .so)
 static PFN_vkGetInstanceProcAddr open_custom(const char *drv) {
-    char src[700], dir[600]; const char *name;
+    char src[1000], dir[600], label[96] = "", meta[220] = "", copy[200]; const char *name; struct stat st;
     if (drv[0] == '/' || !g_ext[0]) snprintf(src, sizeof src, "%s", drv); else snprintf(src, sizeof src, "%s/%s", g_ext, drv);
+    int pkg = !stat(src, &st) && S_ISDIR(st.st_mode);
+    if (pkg) { if (!pkg_so(drv, src, src, sizeof src, label, sizeof label, meta, sizeof meta)) return NULL; }
     name = strrchr(src, '/') ? strrchr(src, '/') + 1 : src;
     if (!*name || strlen(name) >= sizeof g_name) { DRV_RED(drv, "not a file name; the system's driver instead"); return NULL; }
+    // a package's copy is named after the package as well: two packages of the same .so (Turnip builds) must not overwrite one another's copy
+    if (pkg) snprintf(copy, sizeof copy, "%s__%s", label, name); else snprintf(copy, sizeof copy, "%s", name);
     if (g_int[0]) {   // the app: copied in
         snprintf(dir, sizeof dir, "%s/vk_driver/", g_int);
-        if (!copy_in(src, dir, name)) { DRV_RED(drv, "%s: %s; the system's driver instead", src, strerror(errno)); return NULL; }
+        if (!copy_in(src, dir, copy)) { DRV_RED(drv, "%s: %s; the system's driver instead", src, strerror(errno)); return NULL; }
     } else {          // the command-line host (adb shell): loaded where it lies, which must be a folder that allows code (/data/local/tmp, not /sdcard)
         if (access(src, R_OK)) { DRV_RED(drv, "%s: %s; the system's driver instead", src, strerror(errno)); return NULL; }
         snprintf(dir, sizeof dir, "%.*s/", name > src ? (int)(name - src - 1) : 1, name > src ? src : ".");
@@ -114,17 +147,19 @@ static PFN_vkGetInstanceProcAddr open_custom(const char *drv) {
     void *at = dlopen("libadrenotools.so", RTLD_NOW | RTLD_LOCAL);
     __typeof__(adrenotools_open_libvulkan) *open_vk = at ? (__typeof__(adrenotools_open_libvulkan) *)dlsym(at, "adrenotools_open_libvulkan") : NULL;
     if (!open_vk) { DRV_RED(drv, "libadrenotools.so is not in this app (%s): pack the app again; the system's driver instead", dlerror()); return NULL; }
-    void *lib = open_vk(RTLD_NOW | RTLD_LOCAL, ADRENOTOOLS_DRIVER_CUSTOM, NULL, libs, dir, name, NULL, NULL);
+    void *lib = open_vk(RTLD_NOW | RTLD_LOCAL, ADRENOTOOLS_DRIVER_CUSTOM, NULL, libs, dir, copy, NULL, NULL);
     PFN_vkGetInstanceProcAddr g = lib ? (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr") : NULL;
     if (!g) { DRV_RED(drv, "libadrenotools could not open it (adb logcat -s hook_impl says why); the system's driver instead"); return NULL; }
     // (a driver that opened and is not used stays loaded: drivers do not always unload cleanly)
-    VkPhysicalDeviceProperties pr; char path[900]; snprintf(path, sizeof path, "%s%s", dir, name);
+    VkPhysicalDeviceProperties pr; char path[1200]; snprintf(path, sizeof path, "%s%s", dir, copy);
     if (!first_gpu(g, &pr)) { DRV_RED(drv, "it offers no GPU (a build for another GPU?); the system's driver instead"); return NULL; }
     if (!mapped(path)) {
         DRV_RED(drv, "libadrenotools opened the system's driver in its place (adb logcat -s hook_impl says why); the system's driver instead"); return NULL; }
-    snprintf(g_name, sizeof g_name, "%s", name);
-    LOG("[vk] driver: %s (DM_VK_DRIVER, through libadrenotools), not the system's: %s, Vulkan %u.%u.%u, driver version %#x", path, pr.deviceName,
-        VK_API_VERSION_MAJOR(pr.apiVersion), VK_API_VERSION_MINOR(pr.apiVersion), VK_API_VERSION_PATCH(pr.apiVersion), pr.driverVersion);
+    snprintf(g_name, sizeof g_name, "%s", pkg ? label : name);   // the driver line, the status screen, the crash lines and the pipeline cache's file go by the package's
+                                                                 // label, not its .so's name; the start records' file is named by the .so (record_paths), so two packages of one build share one verdict
+    LOG("[vk] driver: %s (DM_VK_DRIVER, through libadrenotools), not the system's: %s, Vulkan %u.%u.%u, driver version %#x%s%s", path, pr.deviceName,
+        VK_API_VERSION_MAJOR(pr.apiVersion), VK_API_VERSION_MINOR(pr.apiVersion), VK_API_VERSION_PATCH(pr.apiVersion), pr.driverVersion,
+        meta[0] ? "; the package: " : "", meta);
     return g;
 }
 
@@ -278,18 +313,23 @@ void vk_driver_ok(void) {
 }
 void vk_driver_lost(VkResult r) { if (g_name[0]) { mark_bad(1); record("device lost", vk_result_str(r)); } }
 
+// DM_VK_DRIVER_ANY=1 (env.txt): try the player's driver on a GPU that is neither an Adreno nor an Xclipse, where no driver package can take the vendor driver's
+// place. The launcher's Graphics driver row sets it with a package, so a choice made on a Mali phone is tried there; the driver probe and the fallbacks decide
+static int any_gpu(void) { const char *e = getenv("DM_VK_DRIVER_ANY"); return e && *e && *e != '0'; }
 int vk_driver_load(void) {
     const char *drv = getenv("DM_VK_DRIVER");
     int on = drv && *drv;
-    const char *gpu = !on ? NULL : adreno() ? "Adreno" : xclipse() ? "Xclipse" : NULL;   // the GPU a player's driver can run on, or NULL
+    int other = 0;   // a GPU that is neither an Adreno nor an Xclipse, with DM_VK_DRIVER_ANY
+    const char *gpu = !on ? NULL : adreno() ? "Adreno" : xclipse() ? "Xclipse" : (other = any_gpu()) ? "other" : NULL;   // the GPU a player's driver can run on, or NULL
     record_paths(on ? drv : NULL, gpu != NULL);
     if (on && !gpu) {
         LOG("[vk] DM_VK_DRIVER %s: not used, this GPU is neither an Adreno (no /dev/kgsl-3d0) nor a Samsung Xclipse (no amdgpu render node), the GPUs another driver (Turnip, "
-            "RADV for Xclipse) runs on: the system's driver runs", drv);
+            "RADV for Xclipse) runs on: the system's driver runs (DM_VK_DRIVER_ANY=1 tries it anyway)", drv);
         record("not used", "not an Adreno or Xclipse GPU (no /dev/kgsl-3d0, no amdgpu render node)");
         snprintf(g_note, sizeof g_note, "Vulkan driver: the system's (%s is for Adreno and Xclipse GPUs only)", g_drv); g_note_warn = 1;
     } else if (gpu && !skip_once()) {
-        LOG("[vk] DM_VK_DRIVER %s: trying it on this %s GPU", drv, gpu);
+        if (other) LOG("[vk] DM_VK_DRIVER %s: trying it on this GPU (DM_VK_DRIVER_ANY=1, and it is neither an Adreno nor an Xclipse): a driver built for another GPU has none here, and the system's runs", drv);
+        else LOG("[vk] DM_VK_DRIVER %s: trying it on this %s GPU", drv, gpu);
         record("trying", "");
         if ((g_gipa = open_custom(drv))) {
             void crash_set_pc_hook(void (*)(int, uint64_t, uint64_t, uint64_t)); crash_set_pc_hook(crash_hook);

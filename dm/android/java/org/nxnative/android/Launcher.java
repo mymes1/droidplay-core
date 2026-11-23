@@ -7,6 +7,8 @@
 //   env_file): a key env.txt sets is shown greyed out with its value. The choices are kept in SharedPreferences, per game. Defaults: the setting's own, or the game's
 //   defaults.txt (KEY=VALUE, written by the packing script: the game language picked with --language).
 //   The game runs in a process of its own (":game", AndroidManifest.xml): starting another game ends the one running, after asking.
+//   Drivers: driver packages (a Vulkan driver's .so and its meta.json, from a zip: Drivers.java) chosen per game by the Graphics driver row, which launcher.txt's
+//   DM_VK_DRIVER names (dm/android/vk_driver.c); Add a driver package takes one from the phone's file picker, Remove takes it off.
 //   Saves: internal storage, saves/<title ID> (front_android.c). The one-game installs kept theirs in internal files/save: the packing script's --migrate moves the game
 //   folder into games/<title ID> and leaves a legacy_save marker there, and this launcher then backs every save up to <external files>/backups/<time>/ and copies
 //   files/save into saves/<title ID> (files/save itself is left as it was). Back up saves does the same backup on demand; a folder pushed to backups/restore/ is copied
@@ -26,6 +28,7 @@ import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -51,6 +54,8 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -115,7 +120,9 @@ public class Launcher extends Activity {
 
     @Override protected void onResume() { super.onResume(); saves.incoming(); }   // a save the computer sent (LauncherSaves.incoming)
     @Override public void onBackPressed() { if (game != null) showGames(); else super.onBackPressed(); }
-    @Override protected void onActivityResult(int req, int res, Intent data) { if (!saves.result(req, res, data)) super.onActivityResult(req, res, data); }
+    @Override protected void onActivityResult(int req, int res, Intent data) {
+        if (req == PICK_DRIVER) { if (res == RESULT_OK && data != null && data.getData() != null) addDriver(data.getData()); return; }
+        if (!saves.result(req, res, data)) super.onActivityResult(req, res, data); }
 
     // ---------------- The games ----------------
     List<Game> scan() {
@@ -211,6 +218,8 @@ public class Launcher extends Activity {
         settings.clear(); chosen.clear();
         define(g.nacp);
         for (Setting s : settings) chosen.put(s.key, prefs.getString(s.key, s.def));
+        String drv = chosen.get("DM_VK_DRIVER");   // a driver package removed since it was chosen: the phone's own driver, not a name that is no longer there
+        if (drv != null && drv.length() != 0 && driverPack(drv) == null) { chosen.put("DM_VK_DRIVER", ""); prefs.edit().putString("DM_VK_DRIVER", "").apply(); }
         setContentView(build(g));
     }
 
@@ -258,6 +267,19 @@ public class Launcher extends Activity {
         s = new Setting("DM_PAD_RAISE", "range", "Controls", "Touch control height",
             "Moves the stick, the D-pad and the buttons up from the bottom. 0% is the standard layout; 100% stops just below the shoulder buttons.");
         s.lo = 0; s.hi = 1; s.step = 0.05f; s.def = "0"; settings.add(s);
+        // Graphics, last: the driver package a game runs (Drivers.java; the Add a driver package and Remove rows come with this section in fill()), and the
+        // compatibility mode for a driver that misbehaves or a phone whose GPU is slow enough that a scene's new pipelines take a while to build
+        List<Drivers.Pack> packs = Drivers.scan(ext);
+        s = new Setting("DM_VK_DRIVER", "choice", "Graphics", "Graphics driver",
+            packs.isEmpty() ? "No driver package on the phone: the phone's own Vulkan driver runs. Add one below (a zip of a driver's .so and its meta.json)."
+                : "A driver package replaces the phone's own Vulkan driver for this game. One built for another GPU cannot run here, and the fallbacks bring the phone's own driver back if it fails (the loading screen says which one ran).");
+        s.values = new String[packs.size() + 1]; s.labels = new String[packs.size() + 1];
+        s.values[0] = ""; s.labels[0] = "Phone's own"; s.def = "";
+        for (int i = 0; i < packs.size(); i++) { s.values[i + 1] = packs.get(i).value(); s.labels[i + 1] = packs.get(i).label(); }
+        settings.add(s);
+        s = new Setting("DM_VK_COMPAT", "toggle", "Graphics", "Compatibility mode",
+            "For a GPU driver that misbehaves, or a phone slow enough that new models show up late: a pipeline is built when a draw first needs it, nothing is memoised, and a shader module is made as its shader loads. Starting a game and a scene's new effects take longer; nothing else changes.");
+        s.def = "0"; settings.add(s);
         for (Setting t : settings) if (defaults.containsKey(t.key)) t.def = defaults.get(t.key);
     }
 
@@ -302,6 +324,71 @@ public class Launcher extends Activity {
         return root;
     }
 
+    // ---------------- Driver packages (Drivers.java) ----------------
+    static final int PICK_DRIVER = 771;
+    // Add a driver package: the phone's file picker, then its zip unpacked into <external files>/drivers/<name>/ (off the UI thread: a driver is tens of MB).
+    // The chosen package is this game's then, as if the Graphics driver row had picked it
+    View driverRows() {
+        LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL);
+        TextView add = text("Add a driver package (.zip)…", 13, TEXT2, 500);
+        add.setGravity(Gravity.CENTER_VERTICAL); add.setMinimumHeight(px(44)); add.setPadding(0, 0, 0, px(2));
+        add.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { pickDriver(); } });
+        box.addView(add);
+        String cur = chosen.get("DM_VK_DRIVER");
+        if (cur != null && cur.length() != 0) {
+            final Drivers.Pack p = driverPack(cur);
+            TextView rm = text("Remove " + (p != null ? p.label() : cur), 13, TEXT2, 500);
+            rm.setGravity(Gravity.CENTER_VERTICAL); rm.setMinimumHeight(px(44));
+            rm.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { askRemoveDriver(); } });
+            box.addView(rm);
+        }
+        return box;
+    }
+    Drivers.Pack driverPack(String value) { for (Drivers.Pack p : Drivers.scan(ext)) if (p.value().equals(value)) return p; return null; }
+    void pickDriver() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT); i.addCategory(Intent.CATEGORY_OPENABLE); i.setType("*/*");
+        i.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {"application/zip", "application/x-zip-compressed", "application/octet-stream"});
+        try { startActivityForResult(Intent.createChooser(i, "Driver package (.zip)"), PICK_DRIVER); }
+        catch (android.content.ActivityNotFoundException e) { toast("This phone has no file picker"); }
+    }
+    void addDriver(Uri uri) {
+        final File tmp = new File(getCacheDir(), "driver-package.zip");
+        toast("Adding the driver package…");
+        new Thread(new Runnable() { public void run() {
+            String err = null; Drivers.Pack pack = null;
+            try {
+                InputStream in = getContentResolver().openInputStream(uri);
+                if (in == null) throw new IOException("the picker gave no file");
+                OutputStream o = new FileOutputStream(tmp);
+                try { byte[] b = new byte[1 << 16]; int k; while ((k = in.read(b)) > 0) o.write(b, 0, k); } finally { o.close(); in.close(); }
+                pack = Drivers.install(ext, tmp);
+            } catch (IOException e) { err = e.getMessage() != null ? e.getMessage() : e.toString(); }
+            catch (RuntimeException e) { err = e.toString(); }   // (a damaged zip whose sections Java refuses)
+            tmp.delete();
+            final String m = err; final Drivers.Pack added = pack;
+            ui.post(new Runnable() { public void run() {
+                if (added == null) { toast("Not added: " + m); return; }
+                chosen.put("DM_VK_DRIVER", added.value()); prefs.edit().putString("DM_VK_DRIVER", added.value()).apply();
+                if (game != null) { define(game.nacp); fill(); }
+                toast(added.label() + " added: this game runs it from its next start");
+            } });
+        } }, "driver-add").start();
+    }
+    void askRemoveDriver() {
+        String cur = chosen.get("DM_VK_DRIVER"); if (cur == null || cur.length() == 0) return;
+        final Drivers.Pack p = driverPack(cur);
+        if (p == null) return;
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle("Remove the driver package?")
+            .setMessage(p.label() + " is taken off the phone. Every game that chose it goes back to the phone's own Vulkan driver.")
+            .setPositiveButton("Remove", new DialogInterface.OnClickListener() { public void onClick(DialogInterface d, int w) {
+                boolean ok = Drivers.remove(ext, p.id);
+                if (ok) { chosen.put("DM_VK_DRIVER", ""); prefs.edit().putString("DM_VK_DRIVER", "").apply(); }
+                if (game != null) { define(game.nacp); fill(); }
+                toast(ok ? p.label() + " removed" : "Could not remove " + p.label());
+            } })
+            .setNegativeButton("Cancel", null).show();
+    }
+
     void fill() {
         list.removeAllViews();
         String section = null;
@@ -309,6 +396,7 @@ public class Launcher extends Activity {
             if (!s.section.equals(section)) { section = s.section; TextView h = caps(section); h.setPadding(0, list.getChildCount() == 0 ? px(4) : px(18), 0, px(6)); list.addView(h); }
             list.addView(row(s));
         }
+        list.addView(driverRows());
         TextView reset = text("Reset to tested defaults", 13, TEXT2, 500); reset.setGravity(Gravity.CENTER_VERTICAL);
         reset.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { prefs.edit().clear().apply(); for (Setting s : settings) chosen.put(s.key, s.def); fill(); } });
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, px(44)); lp.topMargin = px(12);
@@ -383,6 +471,10 @@ public class Launcher extends Activity {
         if (saves.busy) { toast("Wait for the save to finish copying, then press Play"); return; }
         StringBuilder sb = new StringBuilder("# written by the settings screen (Launcher.java); env.txt wins over these\n");
         for (Setting s : settings) if (!envFile.containsKey(s.key)) sb.append(s.key).append('=').append(chosen.get(s.key)).append('\n');
+        // A package is tried on this phone whatever its GPU, including one no driver package can take the vendor driver's place on (a Mali, a PowerVR): the probe,
+        // the fallbacks and the crash guard bring the phone's own driver back when it cannot run (vk_driver.c). Nothing else sets it
+        String drv = chosen.get("DM_VK_DRIVER");
+        if (!envFile.containsKey("DM_VK_DRIVER_ANY") && drv != null && drv.length() != 0) sb.append("DM_VK_DRIVER_ANY=1\n");
         try (FileOutputStream o = new FileOutputStream(new File(g.dir, "launcher.txt"))) { o.write(sb.toString().getBytes(StandardCharsets.UTF_8)); } catch (IOException e) { Log.w(TAG, "launcher.txt: " + e); }
         final String running = runningGame();
         if (running != null && running.equals(g.id)) { resume(); return; }

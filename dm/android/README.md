@@ -74,6 +74,15 @@ one, `dm/games/010015100B514000/patches.py`) are there too, and Keep the GPU clo
 device's own contexts), offered for every game on a phone with `/dev/kgsl-3d0` (Qualcomm's kernel GPU driver, tested as `vk_driver.c` does before loading Turnip), off by default. Play writes the game's `launcher.txt` and starts `GameActivity`, which reads it after `env.txt` without overriding it; a key
 `env.txt` sets is shown greyed out. The choices are kept per game. Not yet on Android: touch feedback.
 
+A game's Graphics section (`Drivers.java`) picks the Vulkan driver it runs: Phone's own, or one of the driver packages on the phone (a Vulkan driver's `.so` and the
+`meta.json` AdrenoTools, Winlator and Eden packages carry, whose `name` and `driverVersion` the row shows), written to `launcher.txt` as `DM_VK_DRIVER=drivers/<name>/<so>`;
+Add a driver package (`.zip`)… opens the phone's file picker for one, unpacks its `.so` and `meta.json` — from the zip's top level, or from the one folder it wraps
+them in — into `<external files>/drivers/<name>/` (a second package of the same name beside it: `-2`), and Remove … takes the chosen one off. The package a game chose
+is tried there whatever its GPU (`DM_VK_DRIVER_ANY=1` is written with it), so a phone the host would not try a driver on (a Mali) sees `trying it on this GPU` and then
+the phone's own driver, since a driver built for another GPU makes no device; the loading screen names the driver that ran or why it did not. Compatibility mode
+(`DM_VK_COMPAT`) is the section's other row: the replay's optional accelerations off, for a driver that misbehaves or a GPU slow enough that a scene's new pipelines
+leave draws out while they build.
+
 Write watches (`DM_PROBE_WATCH`, `dm/host/probe.c`) work here too: `heap+<offset>` names a guest-heap address (the guest address space moves between runs on Android), the page is made
 writable for each emulated store (no second mapping), and STXR / STLXR are carried out as plain stores that succeed. One run with that last change showed a black picture: use the
 watch for finding a writer, not for playing.
@@ -330,10 +339,13 @@ The replay has shaders of its own too, for what Vulkan has no command for: `dm/a
 ## Another Vulkan driver: DM_VK_DRIVER
 
 The host does not link `libvulkan.so`. Every `vk*` function the replay and the front end call is a pointer (`gfx_vk.h`, `VK_NO_PROTOTYPES` with the list in
-`VKB_FNS`), filled by `vk_driver.c` when `vkb()` makes the device: from the system's `libvulkan.so`, opened then, by default; with `DM_VK_DRIVER=<file>`, from a
-driver the player put beside `env.txt` (a Turnip build, as for Switch emulators, or RADV for Xclipse: [Another Vulkan driver](../../docs/android.md#another-vulkan-driver-turnip)).
+`VKB_FNS`), filled by `vk_driver.c` when `vkb()` makes the device: from the system's `libvulkan.so`, opened then, by default; with `DM_VK_DRIVER=<driver>`, from a
+driver the player chose (a Turnip build, as for Switch emulators, or RADV for Xclipse: [Another Vulkan driver](../../docs/android.md#another-vulkan-driver-turnip)), which
+is a single `.so` beside `env.txt`, or a driver package's folder (`<external files>/drivers/<name>/`: a `.so` and its `meta.json`, as the settings screen's Add a driver
+package unpacks a zip; [packages](#driver-packages-a-zip-of-a-so-and-its-metajson) below).
 
-- The file is copied into the internal files (`vk_driver/<name>`, read-only, again when its size or time changes): Android maps no code from shared storage.
+- The file is copied into the internal files (`vk_driver/<name>`, read-only, again when its size or time changes): Android maps no code from shared storage. A package's
+  copy is named `<package label>__<.so name>`, so two packages of the same Turnip build keep their own copies, and each driver keeps its own pipeline cache.
 - It is opened through libadrenotools ([dm/third_party/libadrenotools](../third_party/libadrenotools/README.md)): `adrenotools_open_libvulkan` loads a second copy of
   the system's `libvulkan.so` in a linker namespace of its own, whose hook (`libmain_hook.so`, `libhook_impl.so`) loads the player's driver where that loader would load
   the vendor's. The loader still makes the window surface and the swapchain (Turnip on Android has no WSI of its own). The hooks are found in the app's extracted native
@@ -375,6 +387,9 @@ driver the player put beside `env.txt` (a Turnip build, as for Switch emulators,
   load is the same for any vendor: the hook swaps the file the system's loader opens as `vulkan.<ro.hardware.vulkan>.so` (`vulkan.samsung.so` on an Xclipse,
   through `android_load_sphal_library`). Elsewhere (a Mali) it isn't opened, with one plain `[vk] DM_VK_DRIVER` line, and `libadrenotools.so` is not loaded, so its
   constructor doesn't patch the linker. Which GPU let it try is logged (`trying it on this Xclipse GPU`), and the driver line after it names the driver that ran.
+  `DM_VK_DRIVER_ANY=1` tries it there too (the settings screen writes it beside a chosen package), and says so: no driver package can take Arm's Mali driver's place
+  (PanVK needs the `mali0` DRM uAPI that Samsung's kbase kernel driver does not offer), so the try makes no device and the phone's own driver runs — `trying` in the
+  start record, `no Vulkan device` in the `[RED]` line, both on the status screen.
 - Each driver keeps its own pipeline cache: `DM_PIPELINE_CACHE` with `.<driver file name>` after it (`gfx_vk_draw.inc` `pcache`).
 - `build_android_from_nsp.py` builds the three libraries with every host and packs them into both kinds of app (`build_apk.py --lib`).
 - Tried with Mr. Purple's Turnip T30 (Mesa 26.3.0-devel, Vulkan 1.4.359) on an Odin 2 (Adreno 740, Android 13) and a Retroid Pocket 5 (Adreno 650, Android 13), with
@@ -383,3 +398,21 @@ driver the player put beside `env.txt` (a Turnip build, as for Switch emulators,
   arena took a cached memory type: Turnip lists a write-combined one first, and the completion thread read storage-buffer write-backs from it ([rendering](../../docs/reference/rendering.md#storage-buffer-write-backs-read-from-cached-memory-on-vulkan)).
   On the Retroid Pocket 5 it ran at 25.1 fps (11.3 before), and at 57.7–58.2 fps on 2026-11-10, against 14.9 on Qualcomm's driver, whose compiler no
   longer crashes on it ([baselines](baselines.md), problems 2 and 13).
+
+### Driver packages: a zip of a .so and its meta.json
+
+The emulators' own form of a custom driver is a zip holding a Vulkan driver's `.so` and the `meta.json` that says what it is: AdrenoTools' (Turnip), Winlator's and
+Eden's packages all carry the same fields, `{"schemaVersion": 2, "name": "Turnip 24.3.0", "driverVersion": "24.3.0-devel", "library": "libvulkan_freedreno.so", …}`,
+sometimes with the two files inside one folder of the zip. The settings screen's Add a driver package (`.zip`)… takes one from the phone's file picker (`Drivers.java`,
+`Drivers.install`) and unpacks its `.so` and `meta.json` — the zip's shallowest ones, so a nested README, a licence or a second GPU's `.so` stays out — into
+`<external files>/drivers/<label>/`, the label from `name`, else the `.so`'s file name (`Turnip 24.3.0` → `Turnip_24.3.0`, `-2`, `-3` for a second of the same name; at
+most 512 MB, 4096 files). A folder a player copies in by hand is a package too. The game's Graphics driver row then names it in `launcher.txt` as
+`DM_VK_DRIVER=drivers/<label>/<so>`, a path the host resolves against the same folder (`g_ext`, where `env.txt` is read from), and the host itself decides which
+`.so` the folder presents, `driver_pkg.h` `dpk_scan`: the one its `meta.json`'s `library` names when that file is there, else the folder's only `.so`, else its only
+`libvulkan*.so` (two or more and nothing naming one: the folder holds no driver, and a `[RED]` line says so). The host's own reading of `meta.json` (up to 8 KB, string
+fields only, `driver_pkg.h` `dpk_field`) takes `name` and `driverVersion` (or `packageVersion`) for the driver line, the status screen and the internal copy's name, so
+a package shows up as `Turnip 24.3.0, version 24.3.0-devel` rather than as a file path, and its internal copy and pipeline cache go by the label too
+(`vk_driver/Turnip_24.3.0__libvulkan_freedreno.so`, `DM_PIPELINE_CACHE.Turnip_24.3.0`), so two packages keep their own. A package's `.so` is tried as a single driver
+file is, with the same probe (a GPU offered on an instance made to ask, the file mapped in `/proc/self/maps`), the same start records and crash guard keyed by the
+`.so`'s file name (`vk_driver_state/libvulkan_freedreno.so.json`: two packages of one build are one driver, and share the verdict, which is right), and the same
+fallbacks — a package that cannot run leaves the game on the phone's own driver.

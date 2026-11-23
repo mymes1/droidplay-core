@@ -2481,7 +2481,7 @@ static void *apipe_thread(void *arg) {
     return NULL;
 }
 static int apipe_any(void) {   // DM_VK_ASYNC_PIPE: pipelines may be built in the background at all
-    static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_ASYNC_PIPE"); on = !(e && *e == '0'); if (!on) LOG("[vk] DM_VK_ASYNC_PIPE=0: pipelines met for the first time are built at once, on the replay thread"); }
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_ASYNC_PIPE"); on = !(e && *e == '0') && !compat_on(); if (!on) LOG("[vk] %s: pipelines met for the first time are built at once, on the replay thread", e && *e == '0' ? "DM_VK_ASYNC_PIPE=0" : "DM_VK_COMPAT=1 (compatibility mode)"); }
     return on;
 }
 static int apipe_redraw_too(void) {   // DM_VK_ASYNC_EQUAL=1: depth-equal re-draws are left out as well (the rule before droidplay-core#444, for an A/B)
@@ -4071,7 +4071,7 @@ static int vk_draw(const p_draw *dw, const p_draw_idx *di) {
 // pointer. Only a made pipeline is kept; a dump frame builds every key (its log reads the key's fields). DM_VK_PSO_MEMO=0 (env.txt): every draw builds its key, as before;
 // DM_VK_PSO_CHECK=1 (a diagnostic, off by default): a draw the memo answers builds the key anyway and takes the full key's pipeline; a key or pipeline other than the
 // memo's is a [RED] line (the first 16) naming the fields that differ, and the counts are in the periodic statistics (DM_VK_MEMO_LOG=1)
-static int pso_memo_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PSO_MEMO"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_PSO_MEMO=0: every draw builds its pipeline key"); } return v; }
+static int pso_memo_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PSO_MEMO"); v = !(e && *e == '0') && !compat_on(); if (!v) LOG("[vk] %s: every draw builds its pipeline key", e && *e == '0' ? "DM_VK_PSO_MEMO=0" : "DM_VK_COMPAT=1 (compatibility mode)"); } return v; }
 static int pso_check(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PSO_CHECK"); v = e && *e && *e != '0'; if (v) LOG("[vk] DM_VK_PSO_CHECK=1: the pipeline memo's answers are checked against full keys"); } return v; }
 static struct { uint64_t gen, bl; vshader *sh[4]; VkRenderPass rp; rp_key rk; int prim, z; uint8_t ll; pipe_t *pp; pipe_key k; } g_pso_m;   // k: kept for DM_VK_PSO_CHECK only; bl: pipe_key.bl
 static uint64_t g_pso_hit, g_pso_miss, g_pso_checked, g_pso_bad;

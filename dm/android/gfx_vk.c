@@ -112,6 +112,16 @@ static vkb_ctx g_vk; static pthread_mutex_t g_vk_mu = PTHREAD_MUTEX_INITIALIZER;
 // (no host resets either); DM_VK_HOST_QRESET=0: VK_EXT_host_query_reset is not enabled, and the used queries are reset in the command buffer at the chunk's next begin
 static int qr_used(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_QRESET_USED"); v = !(e && *e == '0'); } return v; }
 static int qr_host_env(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_HOST_QRESET"); v = !(e && *e == '0') && qr_used(); } return v; }
+// DM_VK_COMPAT=1 (env.txt, or the launcher's Compatibility mode, per game): the replay's optional accelerations off, for a driver that misbehaves with one of them, and for
+// a slow GPU whose background pipeline builds leave draws out for longer than they would wait: pipelines are built when a draw first needs them (DM_VK_ASYNC_PIPE=0), the
+// pipeline memo is off (DM_VK_PSO_MEMO=0), and shader modules are made as each shader loads rather than only for the pipelines the driver's cache lacks
+// (DM_VK_MODULE_ID=0). Drawing, its results and its caches are otherwise as they are: the start and the first frames of a scene take longer, and no draw waits
+static int compat_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_VK_COMPAT"); v = e && *e && *e != '0';
+        if (v) LOG("[vk] DM_VK_COMPAT=1: compatibility mode, the optional accelerations off (a pipeline is built when a draw needs it, no pipeline memo, a shader module made as its shader loads)"); }
+    return v;
+}
 static PFN_vkResetQueryPoolEXT g_qreset;   // vkResetQueryPoolEXT, through vkGetDeviceProcAddr (the instance is Vulkan 1.1, and the android-29 libvulkan.so stub has no vkResetQueryPool); NULL: no host resets
 static PFN_vkGetShaderModuleCreateInfoIdentifierEXT g_smid;   // VK_EXT_shader_module_identifier enabled: modules made only for pipelines the driver's cache lacks (gfx_vk_lmod.inc); NULL: made at once
 static PFN_vkGetDeviceFaultInfoEXT g_fault_info;   // VK_EXT_device_fault enabled: what the driver says of a lost device (gpu_fault_log); NULL: not offered
@@ -216,7 +226,7 @@ static int vk_try(char *why, size_t nwhy) {
     // the texture pool by ID (gfx_vk_pool.inc): its indices differ between the lanes of a subgroup, and an ID not made yet reads 0 whatever type it is read as. DM_VK_POOL=0: neither
     { const char *e = getenv("DM_VK_POOL"); int pool = !(e && *e == '0'); g_nonuni = pool && has_ext(de, nd, "VK_EXT_descriptor_indexing"); g_null_desc = pool && has_ext(de, nd, "VK_EXT_robustness2"); }
     // pipelines from the driver's cache by their modules' identifiers, the modules made only when it lacks one (gfx_vk_lmod.inc). DM_VK_MODULE_ID=0: modules made at once
-    int smid; { const char *e = getenv("DM_VK_MODULE_ID"); smid = !(e && *e == '0') && has_ext(de, nd, "VK_EXT_shader_module_identifier") && has_ext(de, nd, "VK_EXT_pipeline_creation_cache_control"); }
+    int smid; { const char *e = getenv("DM_VK_MODULE_ID"); smid = !(e && *e == '0') && !compat_on() && has_ext(de, nd, "VK_EXT_shader_module_identifier") && has_ext(de, nd, "VK_EXT_pipeline_creation_cache_control"); }
     int gm = gm_want(de, nd);   // raw global memory (gfx_vk_gmem.inc): asked for only with DM_VK_RAW_GMEM=1
     int dix = has_ext(de, nd, "VK_EXT_descriptor_indexing"), gmdi = gm && (dix || VK_API_VERSION_MINOR(g_vk.props.apiVersion) >= 2 || VK_API_VERSION_MAJOR(g_vk.props.apiVersion) > 1);   // its descriptor array's features
     free(de);
