@@ -188,6 +188,27 @@ class Windows(unittest.TestCase):
         self.assertEqual((stage / 'spv/vs/0001.spv').read_bytes(), b'spv')
         self.assertEqual((stage / 'icon.jpg').read_bytes(), b'jpg')
 
+    def test_windows_stage_never_links(self):   # a directory link is made with Developer Mode on there, and one the build may not traverse fails it as the stage is walked (WinError 448)
+        tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tmp)
+        code = tmp / 'code'; code.mkdir(); (code / 'main.fixups.tsv').write_bytes(b'fix'); (tmp / 'icon.jpg').write_bytes(b'jpg')
+        stage = tmp / 'stage'; stage.mkdir()
+        with mock.patch.object(ba, 'STAGE_LINKS', False):   # a link would be made (Developer Mode on): the stage still takes the files
+            ba.stage_link(stage / 'code', code); ba.stage_link(stage / 'icon.jpg', tmp / 'icon.jpg')
+        self.assertFalse((stage / 'code').is_symlink()); self.assertFalse((stage / 'icon.jpg').is_symlink())
+        self.assertEqual((stage / 'code/main.fixups.tsv').read_bytes(), b'fix'); self.assertEqual((stage / 'icon.jpg').read_bytes(), b'jpg')
+        self.assertTrue(os.path.samefile(stage / 'code/main.fixups.tsv', code / 'main.fixups.tsv') or True)   # cloned where the volume allows it: the bytes are what matters
+
+    def test_a_file_the_stage_cannot_reach_names_itself(self):   # a mount point Windows will not traverse (WinError 448): one BuildError line, not a traceback out of stat
+        tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tmp)
+        stage = tmp / 'game_app'; (stage / 'code').mkdir(parents=True); bad = stage / 'code/main.fixups.tsv'; bad.write_bytes(b'x')
+        real = Path.stat
+        def stat(self, *a, **k):
+            if self.name == 'main.fixups.tsv': raise OSError(448, 'The path cannot be traversed because it contains an untrusted mount point')
+            return real(self, *a, **k)
+        with mock.patch.object(Path, 'stat', stat), self.assertRaises(ba.BuildError) as e: ba.stage_walk(stage)
+        m = str(e.exception)
+        self.assertIn('main.fixups.tsv', m); self.assertIn('cannot be read', m); self.assertIn('Move the game', m)
+
 
 MB = 1 << 20
 

@@ -698,11 +698,25 @@ def clone(src, dst):   # an APFS clone where the volume can make one, else a har
     except OSError: shutil.copyfile(src, dst)
 
 
-def stage_link(dst, src):   # a symbolic link, else the files cloned (clone): Windows lets a process make symbolic links only with Developer Mode on, or as administrator
-    try: Path(dst).symlink_to(src, target_is_directory=Path(src).is_dir())
-    except OSError:
-        if Path(src).is_dir(): shutil.copytree(src, dst, copy_function=clone)
-        else: clone(src, dst)
+def clone_tree(src, dst):   # a folder's files cloned (clone), a folder at a time: no link, so nothing in the stage is left to traverse
+    for r, _, fs in os.walk(src):
+        d = Path(dst) / Path(r).relative_to(src); d.mkdir(parents=True, exist_ok=True)
+        for f in fs: clone(Path(r, f), d / f)
+
+
+STAGE_LINKS = sys.platform != 'win32'   # whether the stage links a game's folder rather than cloning its files (stage_link): not on Windows
+
+
+def stage_link(dst, src):
+    """The stage's copy of a game's folder or file: a symbolic link where the platform traverses one (Linux, a Mac), else the files cloned (clone). Windows makes a
+    directory symbolic link only with Developer Mode on, or as administrator, and one a process may not traverse fails the whole build as the stage is walked
+    (WinError 448, ERROR_UNTRUSTED_MOUNT_POINT: the walk's stat of the first file under it), so the stage takes the files there instead — hard links (clone), which
+    cost no space and no privilege."""
+    if STAGE_LINKS:
+        try: Path(dst).symlink_to(src, target_is_directory=Path(src).is_dir()); return
+        except OSError: pass
+    if Path(src).is_dir(): clone_tree(src, dst)
+    else: clone(src, dst)
 
 
 # A game app (--game-apk): the game in an app of its own, org.nxnative.game.t<title ID> with its name and icon, entered through dm/android/java GameStart with no launcher
@@ -805,13 +819,26 @@ def defaults_text(g, lang, romfs=None):   # romfs: the RomFS image's path on the
     return ''.join(ln + '\n' for ln in lines)
 
 
+def stage_walk(p):   # a staged folder's [(path, bytes)], subfolders included; a file the build cannot reach says so, rather than a traceback out of stat
+    if not (p and Path(p).is_dir()): return []
+    out = []
+    for r, _, fs in os.walk(p, followlinks=True):
+        for f in fs:
+            q = Path(r, f)
+            try: out.append((q, q.stat().st_size))
+            except OSError as e:
+                raise BuildError(f'the game app cannot be packed: {q} cannot be read ({e}). Move the game\'s folder off the drive or folder it is in (a mount point or a '
+                                 f'virtual folder Windows will not traverse), or make the file readable, and build again')
+    return out
+
+
 def make_game_app(sdk, g, game, patched, spv, font, aoc, defaults, so, meta, work, logs, env, out_dir, xapk, beside=False):
     sys.path.insert(0, str(REPO / 'dm/android/tools')); import build_apk   # pyright: ignore[reportMissingImports]  # dm/android/tools, put on the path here
     pkg = build_apk.game_package(g.id)
     rom = bi.rfs.source(game)
     if not bi.rfs.is_image(rom): raise BuildError(f'a game app reads the RomFS as one image ({game}/RomFS.img), and this extraction has a RomFS folder: extract the game again')
     stage = work / 'game_app'; shutil.rmtree(stage, ignore_errors=True); stage.mkdir(parents=True)
-    def walk(p): return [(Path(r, f), Path(r, f).stat().st_size) for r, _, fs in os.walk(p, followlinks=True) for f in fs] if p and Path(p).is_dir() else []
+    walk = stage_walk
     for name, src in (('code', patched), ('font', font)):
         if src and Path(src).is_dir(): stage_link(stage / name, Path(src).resolve())
     if spv and Path(spv).is_dir(): bi.PROG.set(step='packing the shaders into one file'); pack_spv(spv, stage / SPV_ZIP)

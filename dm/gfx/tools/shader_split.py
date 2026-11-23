@@ -32,7 +32,8 @@
 #   · CRA (Camelot, Mario Tennis Fever): BNSH in the FSHA, VFXB and SARC members of the NARC containers in rom:/42, its files scrambled and listed only in the NRO the game decodes at run time, see cra.py and cra_jobs
 #   · CPK (CRI's file system, Bayonetta 2): BNSH files ('.vso' / '.pso') in the PlatinumGames DAT archives of the CPK entries (CRILAYLA entries, cpk.py), see cpk_jobs
 #       NieR:Automata's DAT members instead prefix length-delimited NVN code and control sections with a binding table (pg_sized_shader)
-#   · HNSHV002 (Needle, Persona 5 Royal): NVN section descriptors in the shader containers embedded in main and the GSC files of its CPK archives, see needle_shaders
+#   · HNSHV002 (Needle, Persona 5 Royal; Hedgehog Engine 2's shader files, Sonic Frontiers' ShaderParam .pac): NVN section descriptors in the shader containers embedded
+#       in main and the GSC files of its CPK archives, and in a shader file's HHNEEDLE archive, see needle_shaders
 #   · GFPAK (Game Freak, Pokémon Sword, Pokémon Legends: Arceus): BNSH entries of the archives under bin/archive (Sword's LZ4; Arceus's Oodle Kraken, decoded by the game's own decoder in the Mac host), see gfpak_members
 #   · .tfxo (Silicon Studio's YEBIS post effects, Pokémon Sword): control sections each followed by its code area, in a zlib stream in main, see tfxo_streams and tfxo_shaders
 #   · control sections loose in main, in no GLSLC output or BNSH file (Advance Wars 1+2: Re-Boot Camp's Bink 2 shaders): paired with their code areas by data records or adjacency, see raw_shaders
@@ -497,33 +498,86 @@ def snowdrop_shaders(d, label, wrapped=True):
         out += snowdrop_shaders(raw, f'{label}#SDFZSTD@{h:#x}', wrapped=False)
     return out
 
-NEEDLE = b'HNSHV002'
+NEEDLE, NEEDLE_FILE = b'HNSHV002', b'HHNEEDLE'
+NEEDLE_DESC = 0x90   # the NVN section descriptor's size in the containers first read (Persona 5 Royal), whose +0x30 holds how far its control section lies from its start, which is
+# the descriptor's own size: a container whose descriptor is another size (Hedgehog Engine 2's shader files, below) is found by that self-consistency, not assumed
+
+
+def needle_desc(d, c, lo, end, ctl, first=None):
+    """The descriptor of the NVN section whose control section starts at c: (its start, its size), or None. Its +0x30 words are the control offset (the descriptor's own size),
+    the code offset, the code length and the control length, all relative to the descriptor's start; a candidate counts only when every one of those agrees with the control
+    section itself (its own length at +0x20) and fits the container. 0x90 bytes is what the containers first read use, so it is tried first, then every other size near it."""
+    order = [first, NEEDLE_DESC] if first else [NEEDLE_DESC]   # this container's own size (a container's sections agree), then 0x90's neighbours
+    order += sorted((x for x in range(0x20, 0x401, 4) if x not in order), key=lambda x: (abs(x - NEEDLE_DESC), x))
+    for q in order:
+        s = c - q
+        if s < lo or s + 0x40 > end: continue
+        co, ko, kn, cn = struct.unpack_from('<4I', d, s + 0x30)
+        if co != q or not 0x760 <= cn or cn != ctl or not kn or ko < co + cn or max(co + cn, ko + kn) > end - s: continue
+        return s, q
+    return None
+
+
+def needle_adjacent(d, c, end, ctl):
+    """The section at c as a control section followed directly by its code area — the layout of every other NVN container in this file (YEBIS's effects, Advance Wars' Bink
+    shaders): the control's own length (+0x20), the code's (+0x704). → (control, code) or None. A shader file of Hedgehog Engine 2's keeps these without the 0x90 descriptor."""
+    if not 0x760 <= ctl or ctl > end - c or c + 0x708 > end: return None
+    kn = struct.unpack_from('<I', d, c + 0x704)[0]
+    if not kn: return None
+    for a in (-(-(c + ctl) // 16) * 16, c + ctl):   # the code areas follow at a 16-byte alignment, or as they lie (SDK 10's headerless compute)
+        if a + kn <= end: return d[c:c + ctl], d[a:a + kn]
+    return None
+
+
 def needle_shaders(d, label):
-    """Needle shader containers, embedded in main and in GFD's GSC files inside CRI CPKs (Persona 5 Royal). HNSHV002 +8 is the container's whole length, big-endian. Variant and reflection
-    metadata varies; each NVN payload has a 0x90-byte little-endian section descriptor immediately before its control section: +0x30 control offset (0x90), +0x34 code offset, +0x38 code
-    length, +0x3c control length, all relative to the descriptor. Both regions must fit this container, not merely the enclosing file. The 0x850-byte controls are followed by graphics
-    code or headerless compute code. Each payload is a separate program, including the 121 post-effect variants in one main container; vertex/pixel pairs exist only at draw time."""
-    out = []
-    for m in re.finditer(NEEDLE, d):
-        h = m.start()
-        if h + 12 > len(d): continue
-        size = struct.unpack_from('>I', d, h + 8)[0]
-        if size < 0x90 + 0x760 or size > len(d) - h: continue   # a literal magic string in executable code is not a container
-        end = h + size; c = d.find(CTL_MAGIC, h + 12, end)
+    """Needle shader containers: HNSHV002 in the shader blobs of main and of GFD's GSC files inside CRI CPKs (Persona 5 Royal), and in Hedgehog Engine 2's shader files
+    (Sonic Frontiers' ShaderParam .pac: HHNEEDLE, a shader path, then an HNSHV002 archive of the shader's permutations and their variants' NVN payloads). An HNSHV002 archive
+    starts with its magic and the length of the container at +8, big-endian. Each NVN payload is a control section and a code area, with a 0x90-byte descriptor before the
+    control section in the containers first read (+0x30 the control offset, +0x34 the code offset, +0x38 the code length, +0x3c the control length, all relative to the
+    descriptor's start). Both regions must fit the container, not merely the enclosing file, and the control and code headers and lengths must agree — or, in a payload
+    that has no descriptor, the code area directly follows the control section. Each payload is a separate program, including the 121 post-effect variants in main and
+    every variant of a shader file; vertex/pixel pairs exist only at draw time. A section that cannot be read is left out and said (a file's other sections are kept): one
+    unreadable payload used to fail the whole file, which for a shader file of Hedgehog Engine 2's is every material shader the game has."""
+    out, problems = [], []
+
+    def sections(h, end):
+        c = d.find(CTL_MAGIC, h + 12, end); first = None   # first: the descriptor size this container's sections use, tried first for the rest
         while c >= 0:
-            s = c - 0x90
-            if s < h + 12 or c + 0x760 > end: red(f'{label} NEEDLE @{h:#x}: incomplete NVN section at {c:#x}')
-            co, ko, kn, cn = struct.unpack_from('<4I', d, s + 0x30)
-            if co != 0x90 or cn < 0x760 or cn != struct.unpack_from('<I', d, c + 0x20)[0]:
-                red(f'{label} NEEDLE @{h:#x}: invalid control offset or control length at {s:#x}')
-            if ko < co + cn or not kn or max(co + cn, ko + kn) > end - s:
-                red(f'{label} NEEDLE @{h:#x}: NVN section at {s:#x} is outside its HNSHV002 container')
-            ctl, code = d[c:c + cn], d[s + ko:s + ko + kn]
+            ctl_n = struct.unpack_from('<I', d, c + 0x20)[0] if c + 0x24 <= end else 0
+            desc = needle_desc(d, c, h + 12, end, ctl_n, first) if ctl_n else None
+            if desc: first = desc[1]
+            if desc:
+                s = desc[0]; co, ko, kn, cn = struct.unpack_from('<4I', d, s + 0x30)
+                ctl, code, at, after = d[c:c + cn], d[s + ko:s + ko + kn], s, s + max(co + cn, ko + kn)
+            else:
+                got = needle_adjacent(d, c, end, ctl_n)
+                if not got:
+                    problems.append(f'{label} NEEDLE @{h:#x}: the control section at {c:#x} has neither a descriptor nor a code area of its own')
+                    c = d.find(CTL_MAGIC, c + 4, end); continue
+                ctl, code = got; at, after = c, c + len(ctl) + len(code)
             st = glslc_stage(ctl, code)
             why = check(label, st, ctl, code) if st else 'unknown shader stage'
-            if why: red(f'{label} NEEDLE @{h:#x}: NVN section at {s:#x}: {why}')
-            out.append((f'{label}#NEEDLE@{s:#x}', st, ctl, code))
-            c = d.find(CTL_MAGIC, s + ko + kn, end)
+            if why:
+                problems.append(f'{label} NEEDLE @{h:#x}: NVN section at {at:#x}: {why}')
+                c = d.find(CTL_MAGIC, c + 4, end); continue
+            out.append((f'{label}#NEEDLE@{at:#x}', st, ctl, code))
+            c = d.find(CTL_MAGIC, max(after, c + 4), end)
+
+    regions = []
+    for m in re.finditer(re.escape(NEEDLE_FILE), d):   # a whole shader file: its own length at +8, then the archive of its variants
+        p = m.start(); n = struct.unpack_from('>I', d, p + 8)[0] if p + 12 <= len(d) else 0
+        if not n or n > len(d) - p: continue
+        k = d.find(NEEDLE, p + 12, p + n)
+        if k >= 0: regions.append((k, p + n))
+    for m in re.finditer(re.escape(NEEDLE), d):   # a container of its own, in a file that is no shader file (main, a GSC)
+        h = m.start()
+        if any(a <= h < b for a, b in regions) or h + 12 > len(d): continue
+        size = struct.unpack_from('>I', d, h + 8)[0]
+        if size < NEEDLE_DESC + 0x760 or size > len(d) - h: continue   # a literal magic string in executable code is not a container
+        regions.append((h, h + size))
+    for h, end in regions: sections(h, end)
+    if problems and not out: red(problems[0])   # nothing in this file: it is one of the files the build says it could not read
+    if problems: print(f'[shaders] {label}: {len(problems)} of {len(problems) + len(out)} NVN sections could not be read, the rest are in ({problems[0]})', file=sys.stderr)
     return out
 
 IDRK, PDRK = b'IDRK0000', b'PDRK0000'
