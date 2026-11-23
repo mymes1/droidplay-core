@@ -2062,13 +2062,16 @@ static lmod *ps_bl_mod(vshader *s, uint32_t miss, int alpha, uint64_t bl, uint32
 // (Vulkan leaves it to the GPU), and Hedgehog Engine 2's G-buffer writes material flags as (flags + 0.5) / 255 into an R8G8B8A8_UNORM target: stored rounded
 // up, every flag byte's low bit is set, the deferred lighting skips its light-probe ambient and the world draws black (Sonic Frontiers). The fragment shader
 // of such a pass gets the variant whose stores spv_rne.h rounds, so the shader decides the tie as the Switch does (gfx_vk_lmod.inc lm_code)
-// DM_VK_UNORM8_RNE=1 (env.txt): on a GPU it does not name; 0: off, the GPU's conversion
+// On every GPU but where DM_VK_UNORM8_RNE=0: a value that is no tie converts to the code it did before on any GPU, and one that is a tie converts to the even code
+// the Switch's GPU gives, so on a GPU that already rounds ties to even (Maxwell's rule, as most do) the rewrite changes no result — it only removes the question.
+// Qualcomm's is where it was seen and checked against a device's G-buffer dump; Arm's Mali is the other phone GPU whose conversion a G-buffer can expose.
 static int rne_on(void) {
     static int v = -1;
     if (v < 0) { const char *e = getenv("DM_VK_UNORM8_RNE");
-        v = e && *e ? *e != '0' : g_vk.props.vendorID == 0x5143;   // Qualcomm's GPU (Adreno; the conversion, Qualcomm's driver's and Turnip's alike, rounds a tie up)
-        if (v) LOG("[vk] %s: a fragment output to an 8-bit UNORM target is rounded to the even code as Maxwell rounds it (spv_rne.h%s)", g_vk.props.deviceName, e && *e ? ", DM_VK_UNORM8_RNE" : "");
-        else if (e && *e) LOG("[vk] DM_VK_UNORM8_RNE=0: an 8-bit UNORM target keeps this GPU's conversion of a tie"); }
+        v = !(e && *e == '0');
+        if (v) LOG("[vk] %s: a fragment output to an 8-bit UNORM target is rounded to the even code as Maxwell rounds it (spv_rne.h%s)", g_vk.props.deviceName,
+                   e && *e ? ", DM_VK_UNORM8_RNE" : "");
+        else LOG("[vk] DM_VK_UNORM8_RNE=0: an 8-bit UNORM target keeps this GPU's conversion of a tie"); }
     return v;
 }
 static uint32_t rne_locs(const pipe_key *k) {   // the locations whose target is an 8-bit UNORM image
