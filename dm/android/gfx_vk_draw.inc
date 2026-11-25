@@ -1491,8 +1491,67 @@ static int dump_bytes(VkFormat f) {   // the texel size of what the dump copies:
     switch (f) { case VK_FORMAT_R5G6B5_UNORM_PACK16: case VK_FORMAT_B5G6R5_UNORM_PACK16: case VK_FORMAT_R4G4B4A4_UNORM_PACK16: case VK_FORMAT_A1R5G5B5_UNORM_PACK16: case VK_FORMAT_R5G5B5A1_UNORM_PACK16: return 2; default: return 0; }
 }
 static uint64_t g_dump_tex[32]; static int g_ndump_tex;   // the textures this pass's draws read (dump_note_tex), copied at its end with the targets
-static void dump_note_tex(uint64_t ser) { for (int i = 0; i < g_ndump_tex; i++) if (g_dump_tex[i] == ser) return; if (g_ndump_tex < 32) g_dump_tex[g_ndump_tex++] = ser; }
 static dump_t g_dumps[1024]; static int g_ndump, g_dump_pass;
+static uint64_t g_dlvl_done[64]; static int g_ndlvl_done;   // the textures whose levels this frame's dump measured (at the first pass that reads them, which is the pass that consumes them)
+static void dump_note_tex(uint64_t ser) { for (int i = 0; i < g_ndump_tex; i++) if (g_dump_tex[i] == ser) return; if (g_ndump_tex < 32) g_dump_tex[g_ndump_tex++] = ser; }
+// ---- the levels of the textures a dumped frame's passes read, level by level: a level or a layer no pass filled reads 0 everywhere, and a pass that samples it
+// (a probe cube's mips, a shadow cascade's layers, a prefiltered sky cube) draws black from it. DM_DUMP_MIPS=0 (env.txt): level 0's layer 0 only, as before ----
+typedef struct { uint64_t ser; VkFormat f; uint32_t level, w, h, z; int n; stg_t s[8]; } dlvl_t;   // n: the copies kept, one per layer (one for a 3D image's level)
+static dlvl_t g_dlvl[512]; static int g_ndlvl; static uint64_t g_dlvl_bytes;   // what the kept levels' copies hold: no more than 256 MB beside the frame's own dumps
+static int dump_mips_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_DUMP_MIPS"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_DUMP_MIPS=0: a dump keeps level 0 and layer 0 of the textures it reads"); } return v; }
+static void dump_levels(vtex *v) {   // every level of a colour texture, each layer apart where it has few: copied at the pass's end with its targets
+    if (!dump_mips_on() || v->levels < 2 || v->aspect != VK_IMAGE_ASPECT_COLOR_BIT || v->samples > 1) return;
+    for (int i = 0; i < g_ndlvl_done; i++) if (g_dlvl_done[i] == v->serial) return;   // measured: what this frame's later passes did with it is theirs
+    if (g_ndlvl_done < (int)(sizeof g_dlvl_done / sizeof *g_dlvl_done)) g_dlvl_done[g_ndlvl_done++] = v->serial;
+    int bpp = dump_bytes(v->fmt); if (!bpp) return;
+    uint32_t L = v->levels > 12 ? 12 : v->levels;
+    for (uint32_t l = 0; l < L; l++) {
+        if (g_ndlvl >= (int)(sizeof g_dlvl / sizeof *g_dlvl)) return;
+        uint32_t w = v->w >> l ? v->w >> l : 1, h = v->h >> l ? v->h >> l : 1;
+        int z3 = v->type == VK_IMAGE_TYPE_3D;
+        uint32_t z = z3 ? (v->d >> l ? v->d >> l : 1) : 1, nl = z3 ? 1 : (v->layers > 8 ? 8 : v->layers);
+        uint64_t nb = (uint64_t)w * h * z * (uint64_t)bpp;
+        if (nb > (16ull << 20) || g_dlvl_bytes + nb * nl > (256ull << 20)) continue;   // a level too large to keep beside the frame: not measured
+        dlvl_t *d = &g_dlvl[g_ndlvl]; memset(d, 0, sizeof *d);
+        d->ser = v->serial; d->f = v->fmt; d->level = l; d->w = w; d->h = h; d->z = z;
+        VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
+        for (uint32_t k = 0; k < nl; k++) {
+            if (!stg_new(&d->s[k], (VkDeviceSize)w * h * z * bpp)) break;
+            vkCmdPipelineBarrier(C->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+            VkBufferImageCopy r = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, z3 ? 0 : k, 1}, .imageExtent = {w, h, z}};
+            vkCmdCopyImageToBuffer(C->cb, v->img, VK_IMAGE_LAYOUT_GENERAL, d->s[k].b, 1, &r);
+            d->n++; g_dlvl_bytes += (uint64_t)w * h * z * (uint64_t)bpp;
+        }
+        if (!d->n) { for (uint32_t k = 0; k < nl; k++) stg_free(&d->s[k]); return; }
+        vkCmdPipelineBarrier(C->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+        g_ndlvl++;
+    }
+}
+static void dump_levels_log(void) {   // what each level holds: the share of its bytes that are not zero (a level nobody filled is 0%)
+    for (int i = 0; i < g_ndlvl; i++) { dlvl_t *d = &g_dlvl[i]; char q[128]; int o = 0;
+        for (int k = 0; k < d->n; k++) { const uint8_t *p = d->s[k].p; size_t n = d->s[k].n, nz = 0;
+            for (size_t j = 0; j < n; j++) if (p[j]) nz++;
+            o += snprintf(q + o, sizeof q - (size_t)o, "%s%.0f%%", k ? " " : "", n ? 100.0 * (double)nz / (double)n : 0.0);
+            g_dlvl_bytes -= (uint64_t)d->s[k].n; stg_free(&d->s[k]); }
+        LOG("[dump] pass %d, texture s%llu level %u %ux%u vk%d: non-zero bytes%s%s", g_dump_pass, (unsigned long long)d->ser, d->level, d->w, d->h, d->f, d->n > 1 ? " per layer " : " ", q);
+    }
+    g_ndlvl = 0; g_ndlvl_done = 0;
+}
+static int unorm8_chans(VkFormat f) {   // the 8-bit UNORM colour formats rne_locs rounds and their sRGB twins, by their channels per texel
+    switch (f) {
+        case VK_FORMAT_R8_UNORM: case VK_FORMAT_R8_SRGB: return 1;
+        case VK_FORMAT_R8G8_UNORM: case VK_FORMAT_R8G8_SRGB: return 2;
+        case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SRGB: case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_B8G8R8A8_SRGB: return 4;
+        default: return 0; }
+}
+static void dump_chan_log(const dump_t *d) {   // an 8-bit target's channels: the mean code and the share of codes that are odd (a tie the shader's store rounded up leaves a channel all odd)
+    int ch = unorm8_chans(d->f); if (!ch || !d->s.n) return;
+    uint64_t sum[4] = {0, 0, 0, 0}, odd[4] = {0, 0, 0, 0}; size_t n = d->s.n / (size_t)ch;
+    for (size_t j = 0; j < n; j++) for (int c = 0; c < ch; c++) { uint8_t b = d->s.p[j * (size_t)ch + (size_t)c]; sum[c] += b; odd[c] += (uint64_t)(b & 1); }
+    char q[160]; int o = 0;
+    for (int c = 0; c < ch; c++) o += snprintf(q + o, sizeof q - (size_t)o, "%s%02x/%d%%", c ? " " : "", n ? (unsigned)(sum[c] / n) : 0u, n ? (int)(100 * odd[c] / n) : 0);
+    LOG("[dump] pass %d att %d %ux%u vk%d: code mean / odd %s", d->pass, d->att, d->w, d->h, d->f, q);
+}
 // or a file named dump_now in $DM_DUMP_DIR's parent: the frame two presents after it is seen (checked every 30 presents; the file is removed)
 static long g_dump_at = -2;
 static long dump_frame(void) { if (g_dump_at == -2) { const char *e = getenv("DM_VK_DUMP"); g_dump_at = e ? atol(e) : -1; } return g_dump_at; }
@@ -1521,6 +1580,7 @@ static void dump_pass_end(void) {
         // a 3D texture: every depth slice, stacked downwards (the height in the name is the slices' total)
         vtex *v = nvn_hm_get(&g_tex, &g_dump_tex[i]); int bpp = v ? dump_bytes(v->fmt) : 0;
         if (!bpp || v->aspect != VK_IMAGE_ASPECT_COLOR_BIT || v->samples > 1 || g_ndump >= (int)(sizeof g_dumps / sizeof *g_dumps)) continue;
+        dump_levels(v);   // its levels, each layer apart: a level or a layer no pass filled reads 0 everywhere
         uint32_t z = v->type == VK_IMAGE_TYPE_3D ? v->d : 1;
         dump_t *d = &g_dumps[g_ndump]; if (!stg_new(&d->s, (VkDeviceSize)v->w * v->h * z * bpp)) continue;
         d->w = v->w; d->h = v->h * z; d->f = v->fmt; d->pass = g_dump_pass; d->att = -1; d->ser = v->serial; g_ndump++;
@@ -1533,11 +1593,13 @@ static void dump_pass_end(void) {
 }
 static void dump_write(void) {   // after the dumped frame's commands completed
     const char *dir = getenv("DM_DUMP_DIR"); if (!dir) dir = ".";
+    dump_levels_log();
     for (int i = 0; i < g_ndump; i++) {
         dump_t *d = &g_dumps[i]; char path[700];
         if (d->att < 0) snprintf(path, sizeof path, "%s/f%ld_p%03d_t_%ux%u_vk%d_s%llu.raw", dir, dump_frame(), d->pass, d->w, d->h, d->f, (unsigned long long)d->ser);
         else snprintf(path, sizeof path, "%s/f%ld_p%03d_a%d_%ux%u_vk%d_s%llu.raw", dir, dump_frame(), d->pass, d->att, d->w, d->h, d->f, (unsigned long long)d->ser);
         FILE *fp = fopen(path, "wb"); if (fp) { fwrite(d->s.p, 1, (size_t)d->s.n, fp); fclose(fp); }
+        dump_chan_log(d);   // an 8-bit target's mean code and odd share per channel
         memcpy(path + strlen(path) - 4, ".png", 4); png_texels(path, d->f, dump_bytes(d->f), d->s.p, d->w, 0, 0, d->w, d->h, 0);   // beside the raw texels, in the formats gfx_vk.c px_rgb converts
         stg_free(&d->s);
     }
@@ -3128,6 +3190,11 @@ static int img_up(vtex *v, int compute) {
 }
 static VkImageView storage_view(vtex *v, const view_t *vv, VkImageViewType vt, VkFormat decl) {
     VkFormat f = decl ? decl : v->fmt;
+    // A storage image's view is 2D or a 2D array, never a cube's (Vulkan's VkDescriptorImageInfo: the view of a storage image is no cube view): the binding's type
+    // says cube while the shader's image is a 2D array of its six faces. Left as a cube view, the view is not made (image view of type 5 failed) and the slot takes the
+    // stand-in, so a compute pass that fills a cube's mips wrote into 1x1: the cube stayed as it was, and a pass sampling those mips draws black (dummy_storage
+    // already stands a 2D array in for an unbound cube slot)
+    if (vt == VK_IMAGE_VIEW_TYPE_CUBE || vt == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY) vt = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
     if (f != v->fmt && (v->conv || !fmt_bytes(v->fmt) || fmt_bytes(v->fmt) != fmt_bytes(f))) { RED_ONCE(110, "image of format %d bound where the shader declares format %d: skipped", v->fmt, f); return VK_NULL_HANDLE; }
     VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, f, &fp);
     // an sRGB format the GPU cannot store to is stored through its UNORM twin, texels as the shader writes them, as Maxwell's image stores do and the Mac's linear-twin
