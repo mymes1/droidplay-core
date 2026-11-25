@@ -3682,7 +3682,8 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
             if (v && s->upsq && !g_upsq_dst) g_upsq_dst = v;   // a listed upscaler's output (gfx_vk_upsq.inc)
             if (v) { iv = storage_view(v, ri->has_v ? &ri->v : NULL, vt, t->fmt); if (!iv) g_bind_bad = 1; }
             if (iv && v->fmt == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && s->stage == SH_CS) { if (t->binding < 64) g_e5_need |= 1ull << t->binding; else g_bind_bad = 1; }   // its pipeline packs RGB9E5 there (cpipe_e5)
-            if (!iv) iv = dummy_storage(vt, t->fmt);
+            if (!iv) { if (tid > 0) RED_ONCE(204, "image slot of shader %s (binding %d, handle %d): %s, so its loads read 0 and its stores land in a 1x1 stand-in", s->key, t->binding, tid,
+                                 v ? "its image has no view" : ri ? "its image could not be made" : "the handle names no registered texture"); iv = dummy_storage(vt, t->fmt); }
             if (bcs) bc_addf(" | image b%d[%d] type %#x tid %d: %s s%llu %ux%ux%u, %u layers, vk format %d, usage %#x", t->binding, e, t->type, tid, v ? "" : ri ? "registered, no image (a stand-in)," : "unregistered (a stand-in),",
                              v ? (unsigned long long)v->serial : 0ull, v ? v->w : 0, v ? v->h : 0, v ? v->d : 0, v ? v->layers : 0, v ? (int)v->fmt : 0, v ? (unsigned)v->usage : 0u);
             if (!iv) g_bind_bad = 1;
