@@ -255,7 +255,7 @@ static int vk_memu_draw_(const p_draw *dw) {
     for (int q = 0; q < 3; q++) { const prog_t *pr = src[q]; if (!pr) continue;
         for (unsigned i = 0; i < pr->nstage && i < 6; i++) {
             uint8_t key[8]; char hx[17]; if (!prog_key(pr, i, key)) continue; key_hex(key, hx);
-            vshader *s = sh_get(hx); if (!s) { g_drop[0]++; g_me_skipped++; return 0; }
+            vshader *s = sh_get(hx); if (!s) { g_drop[0]++; g_me_skipped++; sh_missing(pr, i, hx); return 0; }
             if (s->stage != want[q]) continue;
             sh[q] = s; pst[q] = (int)i; ppr[q] = pr; break;
         } }

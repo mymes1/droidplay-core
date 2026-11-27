@@ -15,6 +15,7 @@
 #include <sys/resource.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <dirent.h>   // the shader pack's modules, counted once (gfx_vk_draw.inc sh_get)
 #include "dm.h"
 #include "nvn_obj.h"
 #include "nvn_mtl.h"

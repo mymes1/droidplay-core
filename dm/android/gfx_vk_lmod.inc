@@ -92,6 +92,9 @@ static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, int tff, ui
         } else {
             free(o);
             if (why == SPV_RNE_KEPT && first) LOG("[RED] [vk] %s: the colour output at location(s) %#x is read, copied or handed on as well as stored, so its target keeps the GPU's conversion (spv_rne.h)", path, rne);
+            // The pass's 8-bit UNORM target is at a location this shader never stores: nothing to round, and no other line says so (a pass whose target is written by a
+            // later pass, or a fragment shader that writes only its neighbours' locations, reads the same as a rewrite that had no site)
+            else if (first) { static int nn; if (nn++ < 8) LOG("[vk] %s: the pass has an 8-bit UNORM target at location(s) %#x, and this fragment shader stores none of them: nothing to round (spv_rne.h)", path, rne); }
         }
     }
     if (alpha) {   // NVN's alpha test, run in a wrapper entry point (spv_alpha.h); a shader it does not apply to is no module

@@ -928,6 +928,32 @@ static void sh_bind_apply(vshader *s) {
     for (int i = 0; i < s->ntx; i++) s->tx[i].binding = (int32_t)spv_bmap_get(m, (uint32_t)s->tx[i].binding);
     for (int i = 0; i < s->nim; i++) s->im[i].binding = (int32_t)spv_bmap_get(m, (uint32_t)s->im[i].binding);
 }
+// The modules the pack holds: its .res.json files, counted once (a pack cut short by a build that could not read a file shows here, and in the draws not made line)
+static int pack_count(const char *dir) {
+    DIR *d = dir && *dir ? opendir(dir) : NULL; if (!d) return -1;
+    struct dirent *e; int n = 0;
+    while ((e = readdir(d))) { size_t el = strlen(e->d_name); if (el > 9 && !strcmp(e->d_name + el - 9, ".res.json")) n++; }
+    closedir(d); return n;
+}
+static void key_hex(const uint8_t k[8], char out[17]);
+// A draw or dispatch whose program has a shader the pack does not hold: not made, and the log names the program (its other stages say which material it is) once per key, then
+// once what the pack holds and what to do about it (the game's own files: an update's or a DLC's RomFS adds shaders, and the build's shader_split.log says what it could not read)
+static void sh_missing(const prog_t *pr, unsigned i, const char *key) {
+    static char seen[16][17]; static int ns, told;
+    for (int j = 0; j < ns; j++) if (!strncmp(seen[j], key, 16)) return;
+    if (!told++) {
+        int n = pack_count(g_spv_dir);
+        LOG("[vk] the shader pack holds %d shader(s) (%s). A key it does not hold is one the game asks for and the split did not translate: a draw that needs one is not made. "
+            "logs/shader_split.log says which file could not be read (a build of the game's own files again takes an update's or a DLC's shaders in as well)", n, g_spv_dir);
+    }
+    if (ns < 16) {
+        char q[128] = ""; int o = 0;
+        for (unsigned j = 0; pr && j < pr->nstage && j < 6; j++) { uint8_t kk[8]; char hx[17]; if (!prog_key(pr, j, kk)) { o += snprintf(q + o, sizeof q - (size_t)o, " ?"); continue; }
+            key_hex(kk, hx); o += snprintf(q + o, sizeof q - (size_t)o, " %s%s", j == i ? "*" : "", hx); }
+        LOG("[RED] [vk] no translated shader %s: a draw or dispatch of the program %s is not made (* the missing stage, its others name the material)", key, q);
+        snprintf(seen[ns++], 17, "%.16s", key);
+    }
+}
 static vshader *sh_get(const char *key) {
     if (key[0] >= 'g' && key[0] <= 'v') return memu_pvs_get(key);   // a mesh shader's pass-through vertex shader (gfx_vk_meshemu.inc memu_pvs_key)
     char k[16]; memcpy(k, key, 16);
@@ -936,7 +962,7 @@ static vshader *sh_get(const char *key) {
     if (!g_spv_dir[0]) { const char *d = getenv("DM_SPV_DIR"); snprintf(g_spv_dir, sizeof g_spv_dir, "%s", d ? d : ""); }
     char p[700]; snprintf(p, sizeof p, "%s/%s.res.json", g_spv_dir, s->key);
     FILE *f = fopen(p, "rb");
-    if (!f) { static int n; if (n++ < 16) LOG("[RED] [vk] no translated shader %s (DM_SPV_DIR %s)", s->key, g_spv_dir); return NULL; }
+    if (!f) return NULL;   // not in the pack: the caller says which program asked for it (sh_missing), and counts the draw or dispatch among those not made
     fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET); char *txt = calloc(1, (size_t)len + 1); fread(txt, 1, (size_t)len, f); fclose(f);
     jv r; js_parse(txt, &r); free(txt);
     const jv *st = js_get(&r, "stage"); const char *sn = st && st->s ? st->s : "vs";
@@ -4294,7 +4320,7 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
         int dup = 0; for (int q = 0; q < b; q++) dup |= D.bst[q] == pr; if (dup) continue;
         for (unsigned i = 0; i < pr->nstage && i < 6; i++) {
             uint8_t key[8]; char hx[17]; if (!prog_key(pr, i, key)) continue; key_hex(key, hx);
-            vshader *s = sh_get(hx); if (!s) { g_drop[0]++; return 0; }
+            vshader *s = sh_get(hx); if (!s) { g_drop[0]++; sh_missing(pr, i, hx); return 0; }
             if (s->stage == SH_CS || s->stage == SH_MS || s->stage == SH_TK) continue;   // a mesh program's stages: its DrawMeshTasks (gfx_vk_mesh.inc)
             if (s->stage == SH_TS) { RED_ONCE(100, "tessellation shaders are not on Vulkan yet: draw skipped (shader %s)", s->key); return 0; }
             int slot = s->stage == SH_VS ? 0 : s->stage == SH_PS ? 1 : s->stage == SH_GS ? 2 : 3;
@@ -4526,9 +4552,11 @@ static int vk_dispatch(const p_dispatch *dp) {
     if (!g_d_init) draw_state_reset();
     rp_end(); tc_clear();
     const prog_t *pr = D.cprog; if (!pr) { RED_ONCE(106, "dispatch with no compute program bound"); return 0; }
-    vshader *s = NULL; int pst = -1;
-    for (unsigned i = 0; i < pr->nstage && i < 6 && !s; i++) { uint8_t key[8]; char hx[17]; if (!prog_key(pr, i, key)) continue; key_hex(key, hx); vshader *x = sh_get(hx); if (x && x->stage == SH_CS) { s = x; pst = (int)i; } }
-    if (!s) { RED_ONCE(107, "compute program without a translated compute shader"); return 0; }
+    vshader *s = NULL; int pst = -1; char miss[17] = ""; int mist = -1;
+    for (unsigned i = 0; i < pr->nstage && i < 6 && !s; i++) { uint8_t key[8]; char hx[17]; if (!prog_key(pr, i, key)) continue; key_hex(key, hx);
+        vshader *x = sh_get(hx); if (x && x->stage == SH_CS) { s = x; pst = (int)i; } else if (!x && mist < 0) { memcpy(miss, hx, 17); mist = (int)i; } }
+    if (!s) { static int nm; if (!nm++) LOG("[RED] [vk] compute program without a translated compute shader%s", mist >= 0 ? "" : " (no stage of it was found in the pack)");
+        if (mist >= 0 && nm == 1) sh_missing(pr, (unsigned)mist, miss); return 0; }
     if (ndve_left_out(s->key)) { if (!g_ndve_skipped++) LOG("[vk] nn::ndve movie network: its dispatches are left out (its picture stayed black without the U-Net, which Qualcomm's compiler does not finish, and the rest cost up to 1.2 s a frame; DM_VK_NDVE=1 runs them): first %s", s->key); return 1; }
     uint32_t g[3] = {(uint32_t)dp->x, (uint32_t)dp->y, (uint32_t)dp->z};
     VkBuffer ib = VK_NULL_HANDLE; VkDeviceSize io = 0; int gpu_args = 0;   // the arguments read on the GPU from a pending write of them (ind_fwd_on)
