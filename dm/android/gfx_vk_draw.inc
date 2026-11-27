@@ -928,6 +928,25 @@ static void sh_bind_apply(vshader *s) {
     for (int i = 0; i < s->ntx; i++) s->tx[i].binding = (int32_t)spv_bmap_get(m, (uint32_t)s->tx[i].binding);
     for (int i = 0; i < s->nim; i++) s->im[i].binding = (int32_t)spv_bmap_get(m, (uint32_t)s->im[i].binding);
 }
+static void key_hex(const uint8_t k[8], char out[17]);
+// A shader the pack does not hold: with DM_SPV_MISSING=<dir> its bytes are saved as <key>.ctl and <key>.code, the pair dm/gfx/tools/shader_dump_pack.py packs for
+// spv_build.py to translate into the game's spv folder (docs/reference/rendering.md, "A draw whose shader the pack does not hold")
+static void spv_missing_save(const char *key) {
+    static const char *dir; static int init, saved, unkept;
+    if (!init) { init = 1; const char *e = getenv("DM_SPV_MISSING"); dir = e && *e ? e : NULL; if (dir) mkdir(dir, 0777); }
+    if (!dir) return;
+    const void *ctl, *code; uint32_t nctl = 0, ncode = 0;
+    if (!nvn_shader_bytes(key, &ctl, &nctl, &code, &ncode)) {   // the host keeps only the last shaders a game set (hle_nvn.c SHB_N)
+        if (!unkept++) LOG("[vk] DM_SPV_MISSING: %s: its bytes were not kept (the host keeps the last shaders a game sets), so it cannot be saved", key);
+        return;
+    }
+    char p[768]; FILE *f; int ok = 1;
+    snprintf(p, sizeof p, "%s/%s.ctl", dir, key); f = fopen(p, "wb"); if (f) { ok &= fwrite(ctl, 1, nctl, f) == nctl; fclose(f); } else ok = 0;
+    snprintf(p, sizeof p, "%s/%s.code", dir, key); f = fopen(p, "wb"); if (f) { ok &= fwrite(code, 1, ncode, f) == ncode; fclose(f); } else ok = 0;
+    if (ok) { if (!saved++) LOG("[vk] DM_SPV_MISSING: shaders the pack lacks are saved to %s (dm/gfx/tools/shader_dump_pack.py packs them, spv_build.py translates them "
+                                "into the game's spv folder: docs/reference/rendering.md)", dir); }
+    else if (!unkept++) LOG("[RED] [vk] DM_SPV_MISSING: %s could not be written to %s", key, dir);
+}
 // The modules the pack holds: its .res.json files, counted once (a pack cut short by a build that could not read a file shows here, and in the draws not made line)
 static int pack_count(const char *dir) {
     DIR *d = dir && *dir ? opendir(dir) : NULL; if (!d) return -1;
@@ -935,23 +954,25 @@ static int pack_count(const char *dir) {
     while ((e = readdir(d))) { size_t el = strlen(e->d_name); if (el > 9 && !strcmp(e->d_name + el - 9, ".res.json")) n++; }
     closedir(d); return n;
 }
-static void key_hex(const uint8_t k[8], char out[17]);
-// A draw or dispatch whose program has a shader the pack does not hold: not made, and the log names the program (its other stages say which material it is) once per key, then
-// once what the pack holds and what to do about it (the game's own files: an update's or a DLC's RomFS adds shaders, and the build's shader_split.log says what it could not read)
+// A draw or dispatch whose program has a shader the pack does not hold: not made, and the log names the program (its other stages say which material it is) once per key,
+// then once what the pack holds and what to do about it, and the key's bytes are saved when DM_SPV_MISSING is set (spv_missing_save: what a build of the game's shaders
+// again would have made, so a game whose pack lacks them can be fixed without its files here)
 static void sh_missing(const prog_t *pr, unsigned i, const char *key) {
-    static char seen[16][17]; static int ns, told;
+    static char seen[64][17]; static int ns, told;
+    if (ns == 64) return;
     for (int j = 0; j < ns; j++) if (!strncmp(seen[j], key, 16)) return;
+    snprintf(seen[ns++], 17, "%.16s", key);
     if (!told++) {
         int n = pack_count(g_spv_dir);
         LOG("[vk] the shader pack holds %d shader(s) (%s). A key it does not hold is one the game asks for and the split did not translate: a draw that needs one is not made. "
             "logs/shader_split.log says which file could not be read (a build of the game's own files again takes an update's or a DLC's shaders in as well)", n, g_spv_dir);
     }
-    if (ns < 16) {
+    spv_missing_save(key);
+    if (ns <= 16) {
         char q[128] = ""; int o = 0;
         for (unsigned j = 0; pr && j < pr->nstage && j < 6; j++) { uint8_t kk[8]; char hx[17]; if (!prog_key(pr, j, kk)) { o += snprintf(q + o, sizeof q - (size_t)o, " ?"); continue; }
             key_hex(kk, hx); o += snprintf(q + o, sizeof q - (size_t)o, " %s%s", j == i ? "*" : "", hx); }
         LOG("[RED] [vk] no translated shader %s: a draw or dispatch of the program %s is not made (* the missing stage, its others name the material)", key, q);
-        snprintf(seen[ns++], 17, "%.16s", key);
     }
 }
 static vshader *sh_get(const char *key) {

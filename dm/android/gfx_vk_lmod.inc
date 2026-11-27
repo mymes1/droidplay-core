@@ -15,7 +15,11 @@ static __thread int t_harr_info;   // what spv_harr did to them (SPV_HARR_SHRUNK
 // storage made read-only where the GPU needs it (spv_readonly); then physical pointers through the pools' array where the driver refuses them (gm_np_code), the pool set (spv_pool_fit), arrays longer than stage_set writes (spv_fit_harr), a kernel's warp as its workgroup (spv_fit_wg32), the subgroup rewrites (spv_fit), a fragment shader's outputs at rne's locations rounded to their 8-bit target as Maxwell rounds them (spv_rne.h) and, last, the set's binding numbers compacted (spv_bind.h). first: the module's first
 // making, which tells *b0, logs and dumps (made again for a pipeline, it says nothing new)
 static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, int tff, uint64_t e5, uint32_t rne, const lm_bl *bl, const spv_bmap *bm, int first, int *b0, size_t *onw) {
-    size_t n = 0; uint32_t *code = spv_read(path, &n); if (!code) return NULL;
+    size_t n = 0; uint32_t *code = spv_read(path, &n);
+    if (!code) {   // the pack's res.json is there but the module is not (a build that stopped part-way, a disk that filled): the draw is dropped without it, and nothing else said why
+        if (first) { static int nl; if (nl++ < 8) LOG("[RED] [vk] %s: no module file where the pack's res.json names one (an interrupted or half-copied build: spv_build.py writes both, or DM_SPV_MISSING saves the shader's bytes for it)", path); }
+        return NULL;
+    }
     uint32_t *ia = NULL; size_t ian = spv_fit_inarr(code, n, path, &ia); if (ian) { free(code); code = ia; n = ian; }   // first: a shader's attribute arrays become an input per location, which spv_drop_inputs can then drop one by one
     if (tff == 2) {   // the vertex shader as a fragment shader (spv_vsfrag.h), after the attribute split and before the rewrites below, so the rewrites below see a fragment shader: spv_readonly, spv_fit_vsinit and spv_fit_precise leave it alone
         size_t cap = n + 3 * 32 + 64, k = 0; uint32_t *o = malloc(cap * 4), *s = malloc(2 * (size_t)code[3] * 4); spv_vsf_io io;

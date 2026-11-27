@@ -296,6 +296,7 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]);
 // the stage's c1 constant segment in its code area (control +0x700 / +0x704 as they were at SetShaders); 0 when the program has no record
 int prog_c1(const prog_t *p, unsigned stage, uint32_t *start, uint32_t *end);
 void nvn_ctl_lens(const void *control, uint32_t *nctl, uint32_t *ncode);   // a control section's bytes in the shader key and its code area's length (NVN or NVN2), hle_nvn.c
+int nvn_shader_bytes(const char *hex16, const void **ctl, uint32_t *nctl, const void **code, uint32_t *ncode);   // DM_SPV_MISSING: the bytes of a shader a game set, kept by its key (hle_nvn.c); 0 when they are not kept
 void mtl_reg_samp(int id, const samp_par *p);
 void mtl_prog_release(prog_t *p);
 void mtl_prog_keys_changed(const prog_t *p);   // after Finalize dropped or SetShaders filled the program's key record (hle_nvn.c: a weak no-op; the Android replay's memo generation)

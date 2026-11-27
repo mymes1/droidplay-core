@@ -856,6 +856,36 @@ int prog_c1(const prog_t *p, unsigned st, uint32_t *start, uint32_t *end) {
     *start = k->c1[st][0]; *end = k->c1[st][1];
     return 1;
 }
+// DM_SPV_MISSING=<dir>: the last shaders' control sections and code areas, kept so the Android replay can save the ones a game's shader pack has no module for as the
+// <key>.ctl / <key>.code pairs dm/gfx/tools/shader_dump_pack.py packs and spv_build.py translates into the game's spv folder (docs/reference/rendering.md, "A draw whose
+// shader the pack does not hold"). 128 shaders and 32 MB stay: a game loads a level's shaders together, so one a pack lacks is among the last set when its first draw is
+// missed (Sonic Frontiers: 16 of them, set on the frame its world came in). A code area over 256 KB or a control section over 16 KB is no shader and is not kept
+#define SHB_N 128
+typedef struct { uint8_t key[8]; uint8_t *ctl, *code; uint32_t nctl, ncode; } shb_t;
+static shb_t g_shb[SHB_N]; static int g_shb_next; static int g_shb_on = -1;
+static int shb_on(void) {
+    if (g_shb_on < 0) { const char *e = getenv("DM_SPV_MISSING"); g_shb_on = e && *e != 0; if (g_shb_on) LOG("[nvn] DM_SPV_MISSING: the last %d shaders a game sets are kept, so the replay can save the ones its pack lacks", SHB_N); }
+    return g_shb_on;
+}
+static void shb_put(const uint8_t key[8], const void *ctl, uint32_t nctl, const void *code, uint32_t ncode) {
+    if (!nctl || !ncode || nctl > 0x4000 || ncode > (1u << 18)) return;
+    shb_t *e = &g_shb[g_shb_next]; g_shb_next = (g_shb_next + 1) % SHB_N;   // the oldest goes
+    uint8_t *c = malloc(nctl), *k = malloc(ncode);
+    if (!c || !k) { free(c); free(k); return; }
+    memcpy(c, ctl, nctl); memcpy(k, code, ncode);
+    free(e->ctl); free(e->code);
+    memcpy(e->key, key, 8); e->ctl = c; e->nctl = nctl; e->code = k; e->ncode = ncode;
+}
+int nvn_shader_bytes(const char *hex16, const void **ctl, uint32_t *nctl, const void **code, uint32_t *ncode) {
+    for (int i = 0; i < SHB_N; i++) {
+        const shb_t *e = &g_shb[i]; if (!e->ctl) continue;
+        static const char *hx = "0123456789abcdef"; char h[17];
+        for (int j = 0; j < 8; j++) { h[2 * j] = hx[e->key[j] >> 4]; h[2 * j + 1] = hx[e->key[j] & 15]; } h[16] = 0;
+        if (!strncmp(h, hex16, 16)) { *ctl = e->ctl; *nctl = e->nctl; *code = e->code; *ncode = e->ncode; return 1; }
+    }
+    return 0;
+}
+
 NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData *sd) {
     prog_t *o = (prog_t *)p;
     if (n < 0 || n > 6) { LOG("[RED] ProgramSetShaders stage count %d", n); return 0; }
@@ -869,6 +899,13 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
     for (int i = 0; i < n; i++) {
         if (keys_hash(&sd[i], 1, k->key[i])) k->ok |= (uint8_t)(1u << i);
         if (sd[i].control) memcpy(k->c1[i], (const uint8_t *)sd[i].control + (nvn2_ctl(sd[i].control) ? 0x40 : 0x700), 8); else k->c1[i][0] = k->c1[i][1] = 0;   // NVN2: +0x40 / +0x44 (dmsh_ampere.py c1_segment)
+        // DM_SPV_MISSING: the bytes of a shader whose key came out, for the replay to save if the game's pack has no module for it (shb_put)
+        if (shb_on() && sd[i].control && sd[i].data && (k->ok >> i & 1)) {
+            uint32_t bctl, bcode, own; nvn_ctl_lens(sd[i].control, &bctl, &bcode);
+            memcpy(&own, (const uint8_t *)sd[i].control + 0x20, 4);   // a section shorter than 0x760 has no 0x880 to give: the key's length would read past it
+            if (!nvn2_ctl(sd[i].control) && own >= 0x24 && own < bctl) bctl = own;
+            if (bcode && bcode < (1u << 24)) shb_put(k->key[i], sd[i].control, bctl, (const void *)(uintptr_t)sd[i].data, bcode);
+        }
         // A stage keyed later (its code area is in no memory pool yet) is keyed from the host's copy of its control section's key bytes, as NVN lets the game free its own
         // once this call returns; DM_NVN_SHDUMP keeps a copy of every stage, for the replay layer to save shaders missing from the map (it writes the same bytes). The program
         // and its copies point at it, so it stays as long as the process, as the record does. nvn_ctl_lens reads it again: NVN's key bytes hold +0x20 and +0x704, NVN2's +0x44
