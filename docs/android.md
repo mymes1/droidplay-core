@@ -345,7 +345,11 @@ The app copies the driver into its internal storage at start, since Android load
 names the driver that runs: `[vk] driver: … (DM_VK_DRIVER, through libadrenotools), not the system's: PurpleVK-public Adreno (TM) 740 …`. A driver that can't run
 (a wrong path, a build for another GPU, one that loads but can't make the Vulkan device or the window's swapchain) gets one `[RED] [vk] DM_VK_DRIVER …` line saying why, and the game runs on
 the system's driver. On a phone with neither an Adreno nor an Xclipse GPU (a Mali, a PowerVR) the line is ignored, and the log says so: no driver package can take the place of Arm's Mali
-driver (the open-source PanVK needs the kernel interface Samsung's Mali driver does not offer), so nothing that can be unpacked there will run a game. A package a game
+driver (Mesa's PanVK needs the `mali0` kernel interface Samsung's Mali driver does not offer), so nothing that can be unpacked there will run a game. FristOneRR's PanVK
+fork is the exception: it talks to Arm's own `mali_kbase` instead, the interface the phone's Mali driver does offer, and runs a game on a Mali (a Helio G99's Mali-G57 MC2, say) without
+the vendor driver — not conformant, and slower than the vendor's. Any Mesa driver that runs there (that fork, a Turnip) compiles its pipelines on the CPU, so the app gives it a shader
+cache folder of the game's own (`cache/<title ID>/mesa`, `MESA_SHADER_CACHE_DIR`; `DM_VK_MESA_CACHE=0` turns it off, and a `MESA_SHADER_CACHE_*` in `env.txt` wins): without it the
+driver compiles every pipeline again at each start, which is what the first minutes' stutter is. A package a game
 chose in the settings screen is tried there anyway (`DM_VK_DRIVER_ANY=1`, written with it), since a wrapper or a driver for that GPU may turn up; it makes no device and
 the game runs on the phone's own driver, with the start screen saying which ran and why. When a start with the driver crashes in the driver's
 code, loses the GPU, or ends in its first 30 seconds (a hang you closed, say), the next start runs on the system's driver once, and the start screen and the log say why;

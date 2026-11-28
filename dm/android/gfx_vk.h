@@ -38,6 +38,8 @@ VKB_FNS_GLOBAL(VKB_DECL) VKB_FNS(VKB_DECL)
 // vk_driver_fail: DM_VK_DRIVER_FAIL names this step (a test: it fails as if the DM_VK_DRIVER driver had failed it). vk_driver_fallback: that driver failed (why), so the
 // system's is opened and the GLOBAL functions loaded from it, with a [RED] line; 0 when none was running or the system's has no Vulkan
 void vk_driver_dirs(const char *ext, const char *internal);
+// vk_driver_mesa_cache (the front end, before the device is made): the folder a Mesa driver keeps its compiled shaders in (MESA_SHADER_CACHE_DIR; DM_VK_MESA_CACHE=0 leaves it to the driver).
+void vk_driver_mesa_cache(const char *internal, const char *id);
 int vk_driver_load(void);
 void vk_driver_instance(VkInstance inst);
 const char *vk_driver_name(void);

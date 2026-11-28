@@ -847,6 +847,7 @@ void android_main(struct android_app *app) {
     }
     vk_driver_dirs(g_ext, g_int);   // DM_VK_DRIVER: a driver beside env.txt, run from a copy in the internal files
     vk_driver_game(g_game, DM_GAME_ID);   // and its start records: games/<title ID>/vk_driver_result.txt
+    vk_driver_mesa_cache(g_int, DM_GAME_ID);   // a Mesa driver's (PanVK, Turnip) own shader cache, before the driver is opened: its compile storm at every start
     vk_start_game(g_game);   // and vk_start.txt, whatever driver runs
     // An Oodle job (DM_OODLE_JOB: hle_oodle.c decodes before nnMain and exits; scripts/android_oodle.py) draws nothing, so it starts now, not at the first window. A build
     // starts it on a phone nobody is watching, and with the screen off or locked the activity gets no window until someone wakes and unlocks it: Pokémon Legends: Z-A's

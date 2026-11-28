@@ -33,6 +33,23 @@ static PFN_vkGetInstanceProcAddr g_gipa;
 static char g_ext[512], g_int[512], g_name[256];   // vk_driver_dirs; g_name: the DM_VK_DRIVER file running
 
 void vk_driver_dirs(const char *ext, const char *internal) { snprintf(g_ext, sizeof g_ext, "%s", ext); snprintf(g_int, sizeof g_int, "%s", internal); }
+// The folder a Mesa driver keeps its compiled shaders in. PanVK (FristOneRR's build for a Mali) and Turnip compile each pipeline's shaders from NIR to the GPU's own code on the
+// CPU, and with no folder to keep them in they compile them again at every start: that storm is a first start's stutter (a Mali-G710's ~600 pipelines froze one outright before
+// its cache was named), and the VkPipelineCache file the replay keeps (DM_PIPELINE_CACHE, gfx_vk_draw.inc) does not help where the driver serializes nothing into it. Mesa reads
+// the folder from MESA_SHADER_CACHE_DIR and has none on Android (no $HOME), so the game's own cache folder is named here: cache/<title ID>/mesa, which Removal.java's removal of
+// the game takes with the pipeline caches beside it. env.txt's own MESA_SHADER_CACHE_DIR or MESA_SHADER_CACHE_DISABLE wins, and DM_VK_MESA_CACHE=0 turns it off.
+void vk_driver_mesa_cache(const char *internal, const char *id) {
+    if (getenv("MESA_SHADER_CACHE_DIR") || getenv("MESA_SHADER_CACHE_DISABLE")) { LOG("[vk] the driver's own shader cache: env.txt's MESA_SHADER_CACHE_* decides"); return; }
+    const char *e = getenv("DM_VK_MESA_CACHE");
+    if (e && e[0] == '0' && !e[1]) { LOG("[vk] DM_VK_MESA_CACHE=0: a Mesa driver keeps no shader cache, so its every start compiles the game's shaders again"); return; }
+    char p[600]; snprintf(p, sizeof p, "%s/cache", internal); mkdir(p, 0700);
+    snprintf(p, sizeof p, "%s/cache/%s", internal, id); mkdir(p, 0700);
+    snprintf(p, sizeof p, "%s/cache/%s/mesa", internal, id);
+    if (mkdir(p, 0700) && errno != EEXIST) { LOG("[RED] [vk] the driver's shader cache folder %s could not be made (%s): a Mesa driver compiles the game's shaders again at every start", p, strerror(errno)); return; }
+    setenv("MESA_SHADER_CACHE_DIR", p, 0);
+    setenv("MESA_SHADER_CACHE_MAX_SIZE", "256M", 0);   // Mesa's own limit is 1 GB: a phone's cache, beside a game that already takes several, is kept smaller
+    LOG("[vk] the driver's own shader cache (a Mesa driver: PanVK, Turnip): %s (MESA_SHADER_CACHE_DIR, up to 256 MB)", p);
+}
 const char *vk_driver_name(void) { return g_name[0] ? g_name : NULL; }
 static char g_why[300];   // the last DRV_RED line's text up to "; the system's driver": why the DM_VK_DRIVER driver isn't running, for its records and the status screen
 static void __attribute__((format(printf, 2, 3))) drv_red(const char *drv, const char *fmt, ...) {
